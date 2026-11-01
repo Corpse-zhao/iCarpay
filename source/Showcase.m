@@ -307,6 +307,27 @@ static const char *jb_path(const char *relative) {
 #endif
 #define BTSTACK_PLIST     SHOWCASE_BTSTACK_PLIST
 #define BTSTACK_SOCKET    SHOWCASE_BTSTACK_SOCKET
+
+/* 安装脚本按 cwd 猜 jbroot，猜错时 plist 里会残留 __JBROOT__。
+ * 这里在运行期（root 身份）自愈一次，免得为一个占位符重装整个包。 */
+static void ensure_btstack_plist(void) {
+    NSString *path = [NSString stringWithUTF8String:BTSTACK_PLIST];
+    NSString *text = [NSString stringWithContentsOfFile:path
+                                               encoding:NSUTF8StringEncoding
+                                                  error:NULL];
+    if (!text.length) return;
+    if ([text rangeOfString:@"__JBROOT__"].location == NSNotFound) return;
+    NSString *root = [NSString stringWithUTF8String:jbroot_prefix()];
+    NSString *fixed = [text stringByReplacingOccurrencesOfString:@"__JBROOT__"
+                                                      withString:root];
+    if ([fixed writeToFile:path atomically:YES
+                  encoding:NSUTF8StringEncoding error:NULL]) {
+        ip_log("rewrote launch plist with jbroot=%s", jbroot_prefix());
+    } else {
+        ip_log("could not rewrite %s (still has __JBROOT__)", BTSTACK_PLIST);
+    }
+}
+
 #ifndef SHOWCASE_BTDAEMON_PATH
 #define SHOWCASE_BTDAEMON_PATH JB_PATH("/usr/bin/BTdaemon")
 #endif
@@ -375,26 +396,51 @@ typedef NS_ENUM(NSInteger, ShowcaseState) {
     StateStopping,
 };
 
+/* launchctl 查找。
+ *
+ * 不能用 access(X_OK)：setuid 进程里 access 按真实 uid（mobile）判权限，
+ * 而且沙盒策略也会让 access 失败，但实际 spawn 是能成功的。所以这里用
+ * stat 判存在，执行失败再往下换候选。
+ *
+ * roothide 把自家的 launchctl 放在 <jbroot>/basebin/ 下；rootless 在
+ * <jbroot>/usr/bin 或 <jbroot>/bin；rootful 才是系统 /bin。 */
+static char g_launchctl_tried[768];
+
 static const char *launchctl_path(void) {
-#ifdef SHOWCASE_ROOTLESS
-    static const char *paths[] = {
-        "/var/jb/usr/bin/launchctl",
-        "/var/jb/bin/launchctl",
-        "/bin/launchctl",
+    static const char *relatives[] = {
+        "/basebin/launchctl",
         "/usr/bin/launchctl",
+        "/bin/launchctl",
+        "/usr/libexec/launchctl",
         NULL
     };
-#else
-    static const char *paths[] = {
+    static const char *systemPaths[] = {
         "/bin/launchctl",
         "/usr/bin/launchctl",
-        "/var/jb/usr/bin/launchctl",
-        "/var/jb/bin/launchctl",
+        "/usr/sbin/launchctl",
+        "/usr/libexec/launchctl",
         NULL
     };
-#endif
-    for (int i = 0; paths[i]; i++) {
-        if (access(paths[i], X_OK) == 0) return paths[i];
+    struct stat st;
+
+    g_launchctl_tried[0] = '\0';
+
+    for (int i = 0; relatives[i]; i++) {
+        const char *p = jb_path(relatives[i]);
+        BOOL ok = stat(p, &st) == 0 && S_ISREG(st.st_mode);
+        snprintf(g_launchctl_tried + strlen(g_launchctl_tried),
+                 sizeof(g_launchctl_tried) - strlen(g_launchctl_tried),
+                 "%s=%s ", p, ok ? "ok" : "no");
+        if (ok) return p;
+    }
+    if (jbroot_prefix()[0]) {
+        for (int i = 0; systemPaths[i]; i++) {
+            BOOL ok = stat(systemPaths[i], &st) == 0 && S_ISREG(st.st_mode);
+            snprintf(g_launchctl_tried + strlen(g_launchctl_tried),
+                     sizeof(g_launchctl_tried) - strlen(g_launchctl_tried),
+                     "%s=%s ", systemPaths[i], ok ? "ok" : "no");
+            if (ok) return systemPaths[i];
+        }
     }
     return NULL;
 }
@@ -1027,6 +1073,15 @@ static NSString *bluetooth_diagnostic_report(
         access(BTSTACK_DYLIB_PATH, R_OK) == 0 ? "yes" : "no"];
     [report appendFormat:@"launch_plist=%s readable=%s\n", BTSTACK_PLIST,
         access(BTSTACK_PLIST, R_OK) == 0 ? "yes" : "no"];
+    NSString *plistBody = [NSString stringWithContentsOfFile:
+        [NSString stringWithUTF8String:BTSTACK_PLIST]
+        encoding:NSUTF8StringEncoding error:NULL];
+    [report appendFormat:@"plist_placeholder=%s\n",
+        [plistBody rangeOfString:@"__JBROOT__"].location == NSNotFound
+            ? "resolved" : "STILL-PRESENT"];
+    const char *ctlPath = launchctl_path();
+    [report appendFormat:@"launchctl=%s\nlaunchctl_tried=%s\n",
+        ctlPath ?: "(none)", g_launchctl_tried];
     [report appendFormat:@"retry=%@\n", retryAttempted ? @"yes" : @"no"];
     if (initial.length)
         [report appendFormat:@"\ncarplay_bt tail:\n%@\n", initial];
@@ -4490,9 +4545,13 @@ static pid_t reusable_baa_broker(void) {
 
     reap_stale_helpers(self.baaBrokerPid);
 
+    ensure_btstack_plist();
+
     const char *launchctl = launchctl_path();
     if (!launchctl) {
-        [self failBluetoothWithReason:@"launchctl was not found."
+        [self failBluetoothWithReason:
+            [NSString stringWithFormat:@"launchctl was not found (%s).",
+                                       g_launchctl_tried]
                              unsupported:NO];
         return;
     }
