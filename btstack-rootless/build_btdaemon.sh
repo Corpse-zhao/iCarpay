@@ -31,7 +31,10 @@ CFLAGS=( -isysroot $SDK -arch arm64 -mios-version-min=12.0 -fno-objc-arc
   -I$ROOT/port/ios -I$ROOT/port/ios/src -I$ROOT/platform/daemon/src
   -I$ROOT/platform/posix -I$ROOT/platform/corefoundation -I$ROOT/src
   -O2 -Wno-deprecated-declarations -Wno-deprecated-non-prototype
-  -Wno-incompatible-pointer-types -Wno-pointer-sign -Wno-unused-command-line-argument )
+  -Wno-incompatible-pointer-types -Wno-pointer-sign -Wno-unused-command-line-argument
+  # iCarpay: 必须开 UNIX domain socket，否则 daemon 走 TCP 分支（127.0.0.1:12345），
+  # 不会创建 /tmp/BTstack，客户端与 launchd 配置全部对不上。
+  -DHAVE_UNIX_SOCKETS )
 LDFLAGS=( -framework Foundation -framework CoreFoundation -framework IOKit -Wl,-undefined,dynamic_lookup )
 echo "[1/3] Compiling..."
 clang ${CFLAGS[@]} ${SRC_C[@]} ${SRC_M[@]} ${LDFLAGS[@]} -o $OUT 2>&1 | tail -20

@@ -405,6 +405,7 @@ typedef NS_ENUM(NSInteger, ShowcaseState) {
  * roothide 把自家的 launchctl 放在 <jbroot>/basebin/ 下；rootless 在
  * <jbroot>/usr/bin 或 <jbroot>/bin；rootful 才是系统 /bin。 */
 static char g_launchctl_tried[768];
+static char g_guard_sh_path[256];
 
 static const char *launchctl_path(void) {
     static const char *relatives[] = {
@@ -534,6 +535,7 @@ static BOOL start_bluetooth_guard(void) {
     const char *killallPath = first_existing_exec(killallJb, killallSys);
     ip_log("[BT] guard: sh=%s killall=%s", shPath ?: "(missing)",
            killallPath ?: "(missing)");
+    if (shPath) snprintf(g_guard_sh_path, sizeof(g_guard_sh_path), "%s", shPath);
     if (!shPath) {
         ip_log("[BT] no usable shell for the recovery guard");
         return NO;
@@ -1079,8 +1081,11 @@ static NSString *bluetooth_diagnostic_report(
         ? bounded_log_tail(@LOG_DIR "/carplay_bt-retry.log", 8192, 18)
         : @"";
     NSString *daemon = bounded_log_tail(@SHOWCASE_BTSTACK_LOG_PATH, 8192, 18);
-    NSString *combined = [NSString stringWithFormat:@"%@\n%@\n%@",
-                          initial ?: @"", retry ?: @"", daemon ?: @""];
+    NSString *daemonDirect = bounded_log_tail(
+        [NSString stringWithUTF8String:log_path("BTdaemon-direct.log")], 8192, 14);
+    NSString *combined = [NSString stringWithFormat:@"%@\n%@\n%@\n%@",
+                          initial ?: @"", retry ?: @"", daemon ?: @"",
+                          daemonDirect ?: @""];
     NSString *failureClass =
         bluetooth_failure_class(reason, combined, registry);
     NSString *registryText = registry == BluetoothRegistryProbeLegacyUART
@@ -1125,6 +1130,9 @@ static NSString *bluetooth_diagnostic_report(
     const char *ctlPath = launchctl_path();
     [report appendFormat:@"launchctl=%s\nlaunchctl_tried=%s\n",
         ctlPath ?: "(none)", g_launchctl_tried];
+    [report appendFormat:@"btstack_socket=%s exists=%s\n", BTSTACK_SOCKET,
+        access(BTSTACK_SOCKET, F_OK) == 0 ? "yes" : "no"];
+    [report appendFormat:@"guard_sh=%s\n", g_guard_sh_path ?: "(none)"];
     [report appendFormat:@"retry=%@\n", retryAttempted ? @"yes" : @"no"];
     if (initial.length)
         [report appendFormat:@"\ncarplay_bt tail:\n%@\n", initial];
@@ -1132,6 +1140,8 @@ static NSString *bluetooth_diagnostic_report(
         [report appendFormat:@"\ncarplay_bt retry tail:\n%@\n", retry];
     if (daemon.length)
         [report appendFormat:@"\nBTstack daemon tail:\n%@\n", daemon];
+    if (daemonDirect.length)
+        [report appendFormat:@"\nBTdaemon direct tail:\n%@\n", daemonDirect];
     return report;
 }
 

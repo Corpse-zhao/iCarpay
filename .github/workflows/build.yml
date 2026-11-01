@@ -51,6 +51,7 @@ jobs:
           BT=btstack-rootless
           clang -dynamiclib -arch arm64 -mios-version-min=12.0 -isysroot "$SDK" \
             -fno-objc-arc -O2 \
+            -DHAVE_UNIX_SOCKETS \
             -I"$BT/src" -I"$BT/platform/daemon/src" -I"$BT/platform/posix" \
             -I"$BT/platform/corefoundation" -I"$BT/port/ios" \
             -Wno-deprecated-declarations -Wno-incompatible-pointer-types \

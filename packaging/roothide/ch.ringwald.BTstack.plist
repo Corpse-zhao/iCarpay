@@ -4,33 +4,22 @@
 <dict>
 	<key>Label</key>
 	<string>ch.ringwald.BTstack</string>
-	<key>OnDemand</key>
-	<true/>
-	<key>ServiceIPC</key>
-	<true/>
-	<key>Debug</key>
-	<false/>
-	<!-- __JBROOT__ 由 postinst 在安装时替换成真实的 jbroot（roothide 路径随机化，
-	     不能硬编码 /var/jb） -->
+	<!-- __JBROOT__ 由 postinst 在安装时替换成真实 jbroot；若没替换成功，
+	     App 启动时会用 ensure_btstack_plist() 自愈。 -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>__JBROOT__/usr/bin/BTdaemon</string>
 	</array>
+	<!-- 不做 socket 激活：BTdaemon 编译时开了 HAVE_UNIX_SOCKETS，
+	     自己在 /tmp/BTstack 上 bind + listen（见 socket_connection.c）。
+	     交给 launchd 代建 socket 反而会与自建路径打架。 -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
 	<key>StandardOutPath</key>
 	<string>/var/log/BTstack.log</string>
-	<key>Sockets</key>
-	<dict>
-		<key>Listeners</key>
-		<dict>
-			<key>SockFamiliy</key>
-			<string>Unix</string>
-			<key>SockType</key>
-			<string>Stream</string>
-			<key>SockPathName</key>
-			<string>/tmp/BTstack</string>
-			<key>SockPathMode</key>
-			<integer>438</integer>
-		</dict>
-	</dict>
+	<key>StandardErrorPath</key>
+	<string>/var/log/BTstack.log</string>
 </dict>
 </plist>
