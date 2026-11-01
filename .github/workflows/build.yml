@@ -67,6 +67,7 @@ jobs:
             "$BT/src/btstack_run_loop_base.c" \
             "$BT/src/btstack_memory.c" \
             "$BT/src/btstack_memory_pool.c" \
+            "$BT/src/classic/sdp_util.c" \
             "$BT/platform/posix/btstack_run_loop_posix.c" \
             tools/btstack_legacy.c \
             -framework Foundation -framework CoreFoundation \
