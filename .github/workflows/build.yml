@@ -205,20 +205,10 @@ jobs:
           ldid -e "$APP/CarPlay Simulator" | grep -E 'deviceidentity|attestation|keystore|no-sandbox' || {
             echo "❌ ent_svc 未生效"; exit 1; }
 
-      # ── 6a. 同源再出一个 ipa（TrollStore / 自签用） ──
-      #    .app 已经签好（ldid + entitlements），这里只换容器。
-      #    注意：ipa 里没有 BTdaemon，蓝牙/HCI 那条路走不通，见 README「两个产物」。
-      - name: Package .ipa
-        run: |
-          set -euo pipefail
-          IPA="build/iCarpay_${PKG_VERSION}_ldid.ipa"
-          python3 tools/make_ipa.py \
-            --app build/payload/Applications/iCarpay.app \
-            --out "$IPA"
-          echo "IPA=$IPA" >> "$GITHUB_ENV"
-          ls -lh "$IPA"
-
-      # ── 6b. 打包（纯 Python，不依赖 dpkg-deb） ──
+      # ── 6. 打包（纯 Python，不依赖 dpkg-deb） ──
+      #    只出 deb。ipa 形态在 0.1.9 之后不再构建：蓝牙/HCI 必须由 root
+      #    守护进程持有，App 进程拿不到，ipa 装上也走不通那条路。
+      #    详见 README「为什么车机端不是纯 IPA」。
       - name: Package .deb
         run: |
           set -euo pipefail
@@ -278,7 +268,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: icarpay
-          path: |
-            build/*.deb
-            build/*.ipa
+          path: build/*.deb
           if-no-files-found: error

@@ -2,7 +2,7 @@
 
 > 在越狱 iPhone 上把 CarPlay 的两端都跑起来：本机可以自己进入 CarPlay 界面，也可以充当车机（Head Unit）让别的 iPhone 无线连进来。
 
-当前版本 `0.1.0` — **M0 骨架阶段**：能装、能启动，功能链路尚未打通。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+当前版本 `0.1.9` — **M1 蓝牙接管阶段**：打包与动态链接层已打通，`CarDisplaySim` 能连上 `BTdaemon` 并收发 HCI 事件；当前卡在 Skywalk 通道上电（`BTSTACK_EVENT_POWERON_FAILED`）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 两条产品线
 
@@ -11,18 +11,20 @@
 | **A. 车机端** | 本机当 Head Unit，别的 iPhone 连进来 | 蓝牙发现 + iAP2 建链 + MFi 认证 + 热点下发 + AirPlay 收流 |
 | **B. 本机自连** | 本机既是车机又是发送端，直接进 CarPlay | 需让 `iapd` 的 iAP2 走回环，无公开先例，M2 阶段做最小实验判定 |
 
-## 两个产物
+## 产物
 
-每次 CI 都会同时产出两个包，**同一个 `.app`、同一套 entitlements**，只是容器不同：
+**只出 deb，不出 ipa。**
 
-| 产物 | 装法 | 能干什么 | 缺什么 |
-|---|---|---|---|
-| `com.corpsezhao.icarpay_0.1.0_iphoneos-arm64e.deb` | roothide 越狱机 → Sileo | 全部功能 | — |
-| `iCarpay_0.1.0_ldid.ipa` | TrollStore / 自签工具 | 桌面图标、启动、UI 与流程 | 没有 `BTdaemon`（root LaunchDaemon），蓝牙那条路走不通 |
+| 产物 | 装法 |
+|---|---|
+| `com.corpsezhao.icarpay_<version>_iphoneos-arm64e.deb` | roothide 越狱机 → Sileo 或 `dpkg -i` |
 
-ipa 里装不下的就是那一件事：**HCI socket 只有 root 守护进程拿得到**，App 进程无论签得多自由都不行。所以「本机当车机」在纯 ipa 形态下跑不通，这是权限结构决定的，不是打包问题。
-
-值得一试的部分：**TrollStore 能把 entitlements 真正授予**（`ldid` 签名 + `platform-application` + `no-sandbox` 会被保留），这是普通自签工具做不到的。所以 MFi/BAA 那道门在 TrollStore 下有可能过——但第二道门（HCI）仍然需要 deb 里的守护进程。两条门的具体位置见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+0.1.9 之前 CI 会顺带打一个 `.ipa`，从 0.1.9 之后不再构建。原因不是打包麻烦，而是权限结构：
+**HCI socket 只有 root 守护进程拿得到**，App 进程无论签得多自由都不行。ipa 装上去只是一个
+图标、UI、流程都在、但蓝牙那条路走不通的外壳。TrollStore 能把 entitlements 真正授予
+（`ldid` 签名 + `platform-application` + `no-sandbox` 会被保留），所以 MFi/BAA 那道门有可能过——
+但第二道门（HCI）仍然需要 deb 里的守护进程。两条门的具体位置见
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 为什么车机端不是纯 IPA
 
@@ -52,7 +54,6 @@ btstack-rootless/ 用户态蓝牙栈（接管 HCI）
 tweak/            注入用 tweak
 packaging/roothide/  deb 元数据与维护脚本
 tools/make_deb.py   纯 Python deb 打包器
-tools/make_ipa.py   纯 Python ipa 打包器
 docs/             架构与路线图
 ```
 
