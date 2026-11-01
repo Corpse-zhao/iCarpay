@@ -12,12 +12,18 @@ if [ ! -d "$JB/Applications" ]; then
 fi
 
 PLIST="$JB/Library/LaunchDaemons/ch.ringwald.BTstack.plist"
+BLUETOOTHD="/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
 
 for t in "$JB/usr/bin/launchctl" "$JB/bin/launchctl" /bin/launchctl /usr/bin/launchctl; do
     if [ -x "$t" ]; then
         if [ -f "$PLIST" ]; then
             "$t" unload "$PLIST" 2>/dev/null || true
         fi
+        # 接管期间 bluetoothd 是被 bootout 掉的，卸载时必须 enable + bootstrap
+        # 才能把它还给系统 —— 只 unload/load 是拉不回来的。
+        "$t" enable system/com.apple.bluetoothd 2>/dev/null || true
+        "$t" bootstrap system "$BLUETOOTHD" 2>/dev/null || true
+        "$t" load "$BLUETOOTHD" 2>/dev/null || true
         break
     fi
 done

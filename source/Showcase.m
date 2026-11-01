@@ -536,9 +536,19 @@ static BOOL start_bluetooth_guard(void) {
         @"echo ready > \"$6\"; "
          "while kill -0 \"$1\" 2>/dev/null; do sleep 1; done; "
          "\"$7\" -TERM CarDisplaySim 2>/dev/null; "
+         /* BTdaemon 是独立进程，不跟着 App 死。它要是活着，控制器一直
+          * 被 BTstack 占着，系统蓝牙照样打不开。必须先杀掉。 */
+         "\"$7\" -9 BTdaemon 2>/dev/null; "
          "\"$2\" unload \"$3\"; "
          "rm -f \"$8\"; "
-         "\"$2\" load \"$4\"; \"$2\" load \"$5\"; "
+         /* 恢复 bluetoothd 必须用 enable + bootstrap。
+          * 接管时用的是 `launchctl bootout system/com.apple.bluetoothd`，
+          * bootout 掉的服务用 `load` 是拉不回来的 —— 这正是"退出 App 后
+          * 蓝牙再也打不开"的直接原因。load 只作为老系统兜底。 */
+         "\"$2\" enable system/com.apple.bluetoothd 2>/dev/null; "
+         "\"$2\" bootstrap system \"$5\" 2>/dev/null; "
+         "\"$2\" load \"$5\" 2>/dev/null; "
+         "\"$2\" load \"$4\" 2>/dev/null; "
          "rm -f \"$9\"; "
          "rm -f \"$6\"";
     /* 每个外部命令都先确认存在，roothide 的 jbroot 布局不能想当然 */
@@ -595,15 +605,30 @@ static BOOL start_bluetooth_guard(void) {
 static void restore_system_bluetooth(const char *reason) {
     const char *launchctl = launchctl_path();
     if (!launchctl) return;
-    char *loadBlueTool[] = { (char *)"launchctl", (char *)"load",
-                             (char *)BLUETOOL_PLIST, NULL };
+
+    /* 接管时 bluetoothd 是被 `launchctl bootout system/com.apple.bluetoothd`
+     * 摘掉的。bootout 掉的服务用 `load` 拉不回来 —— 必须先 enable 再
+     * bootstrap。这是"退出 App 之后系统蓝牙再也打不开"的直接原因。
+     * `load` 只保留给老 launchctl 兜底。 */
+    char *enableArgv[] = { (char *)"launchctl", (char *)"enable",
+                           (char *)"system/com.apple.bluetoothd", NULL };
+    int enableRc = run_blocking(launchctl, enableArgv);
+
+    char *bootstrapArgv[] = { (char *)"launchctl", (char *)"bootstrap",
+                              (char *)"system", (char *)BLUETOOTHD_PLIST, NULL };
+    int bootRc = run_blocking(launchctl, bootstrapArgv);
+
     char *loadBluetoothd[] = { (char *)"launchctl", (char *)"load",
                                (char *)BLUETOOTHD_PLIST, NULL };
-    int toolRc = run_blocking(launchctl, loadBlueTool);
     int daemonRc = run_blocking(launchctl, loadBluetoothd);
+
+    char *loadBlueTool[] = { (char *)"launchctl", (char *)"load",
+                             (char *)BLUETOOL_PLIST, NULL };
+    int toolRc = run_blocking(launchctl, loadBlueTool);
+
     unlink(BT_OWNED_FLAG);
-    ip_log("[BT] system Bluetooth load requested (%s): BlueTool=%d bluetoothd=%d",
-           reason, toolRc, daemonRc);
+    ip_log("[BT] system Bluetooth restored (%s): enable=%d bootstrap=%d load=%d BlueTool=%d",
+           reason, enableRc, bootRc, daemonRc, toolRc);
     stop_bluetooth_guard();
 }
 
@@ -5088,6 +5113,11 @@ static pid_t reusable_baa_broker(void) {
 
         kill_pid(self.carplayServicesPid); self.carplayServicesPid = 0;
         kill_pid(self.carplayBtPid);       self.carplayBtPid = 0;
+        /* BTdaemon 是独立进程，之前这里只把 pid 置 0 没杀 —— 于是它继续
+         * 占着控制器，系统蓝牙就再也打不开。必须先真的杀掉。
+         * 另外补一次按名字清场：launchd 拉起的情况下 pid 可能没被记到。 */
+        kill_pid(self.btdaemonPid);
+        signal_processes_named("BTdaemon", SIGKILL, 0);
         self.btdaemonPid = 0;
         self.bluetoothHandedOff = NO;
 
