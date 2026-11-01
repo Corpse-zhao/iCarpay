@@ -1076,6 +1076,9 @@ static NSString *bluetooth_failure_class(NSString *reason,
     return @"bluetooth-takeover-failed";
 }
 
+/* 前置声明：诊断报告在文件前部就要探测 bluetoothd 是否还活着 */
+static BOOL process_named_running(const char *name);
+
 /* 文件指纹（大小 + mtime）。诊断里用它判断两件事：
  *   - BTdaemon 是不是本次安装的新二进制（大小变了就说明换过）
  *   - /tmp/BTstack 是不是本次新建的（mtime 比进程还早 = 连着别人的 socket） */
