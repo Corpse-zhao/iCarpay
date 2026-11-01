@@ -29,7 +29,17 @@
 #define HAVE_TRANSPORT_H4
 #define UART_DEVICE "/dev/tty.bluetooth"
 #define UART_SPEED 3000000
-#define USE_LAUNCHD
+/* iCarpay: 不走 launchd socket 激活。
+ *
+ * 原实现（USE_LAUNCHD）依赖 launchd 在 plist 声明 Sockets 后通过
+ * launch_msg(LAUNCH_KEY_CHECKIN) 把监听 fd 交过来；调用方不是 launchd 作业时
+ * 直接 "Check-in failed: 3"(ESRCH)，而 roothide 上这条链路本身也不可靠。
+ * 关掉之后 daemon 自己 bind /tmp/BTstack（HAVE_UNIX_SOCKETS），
+ * 无论由 launchd 拉起还是被 App 直接 spawn 都能工作。
+ * 需要旧行为时用 -DICARPAY_FORCE_LAUNCHD 打开。 */
+#ifndef ICARPAY_FORCE_LAUNCHD
+// #define USE_LAUNCHD
+#endif
 #define USE_SPRINGBOARD
 
 #define NVM_NUM_LINK_KEYS 16
