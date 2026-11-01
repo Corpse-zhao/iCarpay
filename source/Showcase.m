@@ -610,6 +610,7 @@ static BOOL start_bluetooth_guard(void) {
 /* disarmGuard = NO 用于 Wi-Fi handoff：那时 CarPlay 会话还在跑，用户随时可能
  * 从多任务里划掉 App（force-quit 不会走 stopFlow）。guard 是唯一能在那条路径上
  * 收拾残局的角色，绝不能提前卸掉。 */
+static BOOL process_named_running(const char *name);
 static void restore_system_bluetooth(const char *reason, BOOL disarmGuard) {
     const char *launchctl = launchctl_path();
     if (!launchctl) return;
@@ -2259,8 +2260,7 @@ static BOOL process_named_running(const char *name) {
 static BOOL wait_process_gone(const char *name, int seconds) {
     for (int i = 0; i < seconds * 10; i++) {
         if (!process_named_running(name)) return YES;
-        usleep(100000);
-    }
+        usleep(100000);    }
     ip_log("[BT] %s still alive after %d sec", name, seconds);
     return NO;
 }
