@@ -1,0 +1,30 @@
+#!/bin/sh
+# iCarpay prerm (roothide) —— 卸载前停掉蓝牙守护进程，把蓝牙还给系统
+set -e
+
+JB="$(pwd)"
+if [ ! -d "$JB/Applications" ]; then
+    if [ -n "$JBROOT" ] && [ -d "$JBROOT/Applications" ]; then
+        JB="$JBROOT"
+    elif [ -d /var/jb/Applications ]; then
+        JB="/var/jb"
+    fi
+fi
+
+PLIST="$JB/Library/LaunchDaemons/ch.ringwald.BTstack.plist"
+
+for t in "$JB/usr/bin/launchctl" "$JB/bin/launchctl" /bin/launchctl /usr/bin/launchctl; do
+    if [ -x "$t" ]; then
+        if [ -f "$PLIST" ]; then
+            "$t" unload "$PLIST" 2>/dev/null || true
+        fi
+        break
+    fi
+done
+
+# 让系统重新接管蓝牙，避免卸载后蓝牙仍被 BTstack 占用
+if command -v killall >/dev/null 2>&1; then
+    killall -9 BTdaemon 2>/dev/null || true
+fi
+
+exit 0

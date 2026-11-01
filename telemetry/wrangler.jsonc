@@ -1,0 +1,10 @@
+{
+  "name": "showcase-telemetry",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "aminerostane.com/api/ping", "zone_name": "aminerostane.com" }],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "showcase-telemetry", "database_id": "e2a1dfbe-4380-47be-aa3f-f53711ccaa60" }
+  ]
+}

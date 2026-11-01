@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <!-- Bluetooth -->
+    <key>com.apple.bluetooth.system</key>
+    <true/>
+    <key>com.apple.private.carkit</key>
+    <true/>
+    <key>com.apple.security.exception.iokit-user-client-class</key>
+    <array>
+        <string>AppleBTHciUC</string>
+        <string>AppleBTMgmtUC</string>
+    </array>
+    <key>com.apple.security.exception.mach-lookup.global-name</key>
+    <array>
+        <string>com.apple.server.bluetooth</string>
+        <string>com.apple.server.bluetooth.general.xpc</string>
+        <string>com.apple.server.bluetooth.le.att.xpc</string>
+        <string>com.apple.carkit.service</string>
+    </array>
+    <!-- BAA / DeviceIdentity -->
+    <key>com.apple.mobileactivationd.spi</key>
+    <true/>
+    <key>com.apple.mobileactivationd.device-identifiers</key>
+    <true/>
+    <key>com.apple.mobileactivationd.deviceidentity</key>
+    <true/>
+    <key>com.apple.security.attestation.access</key>
+    <true/>
+    <key>com.apple.keystore.sik.access</key>
+    <true/>
+</dict>
+</plist>

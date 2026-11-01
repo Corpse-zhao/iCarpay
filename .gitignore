@@ -1,0 +1,24 @@
+# 构建产物
+build/
+.theos/
+packages/
+*.deb
+*.ipa
+*.dylib.tmp
+
+# 编译中间件
+*.o
+*.d
+*.a
+!.theos/lib/*.a
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# 本地测试残留
+/tmp/
+*.log.tmp

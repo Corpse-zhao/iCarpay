@@ -1,0 +1,214 @@
+name: Build iCarpay
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      # roothide 只认这个 Architecture，写错 Sileo 直接拒装
+      PKG_ARCH: iphoneos-arm64e
+      PKG_ID: com.corpsezhao.icarpay
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          clang --version
+
+      - name: Install ldid
+        run: brew install ldid
+
+      # ── iOS SDK：与既有越狱工程同款做法，sparse checkout 单个版本 ──
+      - name: Fetch iOS SDK
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          cd "$RUNNER_TEMP/sdks"
+          git sparse-checkout set iPhoneOS14.5.sdk
+          echo "SDK=$RUNNER_TEMP/sdks/iPhoneOS14.5.sdk" >> "$GITHUB_ENV"
+          ls "$RUNNER_TEMP/sdks"
+
+      - name: Read version
+        run: |
+          V="$(cat VERSION | tr -d '[:space:]')"
+          # Showcase 的版本号形如 1.0~beta5-2，deb 版本号里 ~ 合法，直接用
+          echo "PKG_VERSION=$V" >> "$GITHUB_ENV"
+          echo "iCarpay version: $V"
+
+      # ── 1. libBTstack：上游只把它放在历史 deb 里，这里用同一套源码自己编 ──
+      #    carplay_bt 只用到 3 个接口（set_power_mode / set_discoverable /
+      #    set_system_bluetooth_enabled），所以只需要 daemon 的客户端部分。
+      - name: Build libBTstack.dylib
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          BT=btstack-rootless
+          clang -dynamiclib -arch arm64 -mios-version-min=12.0 -isysroot "$SDK" \
+            -fno-objc-arc -O2 \
+            -I"$BT/src" -I"$BT/platform/daemon/src" -I"$BT/platform/posix" \
+            -I"$BT/platform/corefoundation" -I"$BT/port/ios" \
+            -Wno-deprecated-declarations -Wno-incompatible-pointer-types \
+            -Wno-unused-command-line-argument \
+            "$BT/platform/daemon/src/btstack.c" \
+            "$BT/platform/daemon/src/daemon_cmds.c" \
+            "$BT/platform/daemon/src/socket_connection.c" \
+            "$BT/src/btstack_linked_list.c" \
+            "$BT/src/btstack_util.c" \
+            "$BT/src/btstack_run_loop.c" \
+            "$BT/src/btstack_run_loop_base.c" \
+            "$BT/src/btstack_memory.c" \
+            "$BT/src/btstack_memory_pool.c" \
+            -framework Foundation -framework CoreFoundation \
+            -Wl,-undefined,dynamic_lookup \
+            -install_name @loader_path/libBTstack.dylib \
+            -o build/libBTstack.dylib
+          lipo -info build/libBTstack.dylib
+          nm -gU build/libBTstack.dylib | grep -E 'btstack_set_(power_mode|discoverable|system_bluetooth)' || true
+
+      # ── 2. BTdaemon：与上游同一个脚本，只是把 SDK/ent/out 都指到本地 ──
+      - name: Build BTdaemon
+        run: |
+          set -euo pipefail
+          chmod +x btstack-rootless/build_btdaemon.sh
+          SDK="$SDK" \
+          ENT="$PWD/source/ent_btdaemon.xml" \
+          OUT="$PWD/build/BTdaemon" \
+            zsh btstack-rootless/build_btdaemon.sh
+          lipo -info build/BTdaemon
+
+      # ── 3. 三个 App 内可执行体 ──
+      - name: Build app binaries
+        run: |
+          set -euo pipefail
+          CF="-fobjc-arc -miphoneos-version-min=12.0 -isysroot $SDK -O2 \
+              -Wno-deprecated-declarations -Wno-unused-command-line-argument \
+              -Wl,-undefined,dynamic_lookup"
+
+          # 主 App
+          clang $CF -DSHOWCASE_ROOTLESS=1 \
+            -DAPP_VERSION=\"$PKG_VERSION\" -DPACKAGE_VERSION=\"$PKG_VERSION\" \
+            -o build/Showcase source/Showcase.m \
+            -framework UIKit -framework AVFoundation -framework AudioToolbox \
+            -framework CoreMedia -framework Foundation -framework Security
+
+          # 蓝牙辅助（唯一链接 libBTstack 的）
+          clang $CF -DSHOWCASE_ROOTLESS=1 \
+            -o build/CarDisplaySim source/carplay_bt.m build/libBTstack.dylib \
+            -framework Foundation -framework Security
+
+          # AirPlay / 认证服务
+          clang $CF -DSHOWCASE_ROOTLESS=1 \
+            -o build/carplay_services source/carplay_services.m source/carplay_pair.c \
+            source/vendor/monocypher/monocypher.c \
+            source/vendor/monocypher/monocypher-ed25519.c \
+            source/vendor/libtommath/tommath.c \
+            -framework Foundation -framework Security
+
+          for b in Showcase CarDisplaySim carplay_services; do
+            echo "--- $b"; lipo -info "build/$b"
+          done
+
+      # ── 4. 组 payload（roothide：相对路径，不带 var/jb） ──
+      - name: Assemble payload
+        run: |
+          set -euo pipefail
+          P=build/payload
+          APP="$P/Applications/iCarpay.app"
+          mkdir -p "$APP" "$P/usr/bin" "$P/usr/share/icarpay" "$P/Library/LaunchDaemons"
+
+          cp build/Showcase            "$APP/Showcase"
+          cp build/CarDisplaySim       "$APP/CarDisplaySim"
+          cp build/carplay_services    "$APP/CarPlay Simulator"
+          cp build/libBTstack.dylib    "$APP/libBTstack.dylib"
+          cp source/Info.plist         "$APP/Info.plist"
+          cp icon/generated/*.png      "$APP/"
+          cp -R source/Localizations/*.lproj "$APP/"
+          cp source/ent_*.xml          "$P/usr/share/icarpay/"
+          cp build/BTdaemon            "$P/usr/bin/BTdaemon"
+          cp packaging/roothide/ch.ringwald.BTstack.plist "$P/Library/LaunchDaemons/"
+
+          find "$P" -name '.DS_Store' -delete
+          find "$P" -type f | sort
+
+      # ── 5. 用 entitlements 签名（BAA 的钥匙就在这里） ──
+      - name: Sign with entitlements
+        run: |
+          set -euo pipefail
+          APP=build/payload/Applications/iCarpay.app
+          ldid -S "$APP/libBTstack.dylib"
+          ldid -Ssource/ent_app.xml       "$APP/Showcase"
+          ldid -Ssource/ent_bt.xml        "$APP/CarDisplaySim"
+          ldid -Ssource/ent_svc.xml       "$APP/CarPlay Simulator"
+          ldid -Ssource/ent_btdaemon.xml  build/payload/usr/bin/BTdaemon
+          echo "--- entitlements 自检（必须能看到 deviceidentity / attestation / keystore）"
+          ldid -e "$APP/CarPlay Simulator" | grep -E 'deviceidentity|attestation|keystore|no-sandbox' || {
+            echo "❌ ent_svc 未生效"; exit 1; }
+
+      # ── 6. 打包（纯 Python，不依赖 dpkg-deb） ──
+      - name: Package .deb
+        run: |
+          set -euo pipefail
+          DEB="build/${PKG_ID}_${PKG_VERSION}_${PKG_ARCH}.deb"
+          python3 tools/make_deb.py \
+            --payload build/payload \
+            --debian  packaging/roothide \
+            --version "$PKG_VERSION" \
+            --arch    "$PKG_ARCH" \
+            --out     "$DEB"
+          echo "DEB=$DEB" >> "$GITHUB_ENV"
+
+      # ── 7. 回读校验（结构错了就别上传） ──
+      - name: Verify package
+        run: |
+          python3 - <<'PY'
+          import io, os, tarfile
+          p = os.environ["DEB"]
+          raw = open(p, "rb").read()
+          assert raw.startswith(b"!<arch>\n"), "ar magic 错误"
+          off, members = 8, {}
+          while off < len(raw):
+              hdr = raw[off:off+60]
+              if len(hdr) < 60: break
+              name = hdr[0:16].decode().strip().rstrip("/")
+              size = int(hdr[48:58].decode().strip())
+              off += 60
+              members[name] = raw[off:off+size]
+              off += size + (size % 2)
+          print("ar members:", list(members))
+
+          with tarfile.open(fileobj=io.BytesIO(members["control.tar.gz"]), mode="r:gz") as tf:
+              names = {ti.name.lstrip("./"): ti for ti in tf.getmembers()}
+              for s in ("postinst", "prerm", "postrm"):
+                  ti = names[s]
+                  assert ti.mode == 0o755, "%s 权限必须是 0755，实际 %o" % (s, ti.mode)
+              ctl = tf.extractfile(names["control"]).read().decode()
+              assert "Architecture: iphoneos-arm64e" in ctl, "Architecture 必须是 iphoneos-arm64e"
+              assert "Package: com.corpsezhao.icarpay" in ctl
+              print("control OK / 脚本权限 OK")
+
+          with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"]), mode="r:gz") as tf:
+              names = [ti.name for ti in tf.getmembers()]
+              for bad in names:
+                  assert not bad.startswith("./var/jb"), "roothide 不能带 var/jb 前缀: " + bad
+              must = ["./Applications/iCarpay.app/Showcase",
+                      "./Applications/iCarpay.app/CarPlay Simulator",
+                      "./usr/bin/BTdaemon",
+                      "./Library/LaunchDaemons/ch.ringwald.BTstack.plist"]
+              for m in must:
+                  assert m in names, "缺文件: " + m
+              print("payload 共 %d 项" % len(names))
+          print("✅ 包结构校验通过")
+          PY
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: icarpay-deb
+          path: build/*.deb
+          if-no-files-found: error

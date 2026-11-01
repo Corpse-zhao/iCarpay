@@ -1,0 +1,74 @@
+#!/bin/sh
+# iCarpay postinst (roothide)
+#
+# roothide 的 jbroot 路径是随机化的（不是 /var/jb），所以这里所有路径都相对
+# 当前工作目录解析 —— dpkg 执行维护脚本时 cwd 就是 jbroot 根。
+# 二进制已在构建阶段用 ldid + entitlements 签好，安装时不再需要 ldid。
+set -e
+
+JB="$(pwd)"
+if [ ! -d "$JB/Applications" ]; then
+    # 兜底：显式环境变量 -> 传统 rootless 布局
+    if [ -n "$JBROOT" ] && [ -d "$JBROOT/Applications" ]; then
+        JB="$JBROOT"
+    elif [ -d /var/jb/Applications ]; then
+        JB="/var/jb"
+    fi
+fi
+
+APP="$JB/Applications/iCarpay.app"
+BTDAEMON="$JB/usr/bin/BTdaemon"
+BTLIB="$JB/usr/lib/libBTstack.dylib"
+PLIST="$JB/Library/LaunchDaemons/ch.ringwald.BTstack.plist"
+
+echo "iCarpay: jbroot = $JB"
+
+# ── 1. 应用包权限 ────────────────────────────────────────────────
+if [ -d "$APP" ]; then
+    chown -R root:wheel "$APP" 2>/dev/null || true
+    chmod 0755 "$APP" 2>/dev/null || true
+    chmod 0644 "$APP"/Info.plist "$APP"/Icon*.png 2>/dev/null || true
+    chmod 0755 "$APP"/libBTstack.dylib 2>/dev/null || true
+    # 三个可执行体需要 setuid 才能拿到 root 身份起蓝牙/热点
+    chmod 4755 "$APP"/Showcase 2>/dev/null || true
+    chmod 4755 "$APP"/CarDisplaySim 2>/dev/null || true
+    chmod 4755 "$APP"/"CarPlay Simulator" 2>/dev/null || true
+    chmod 0755 "$APP"/*.lproj 2>/dev/null || true
+    chmod 0644 "$APP"/*.lproj/* 2>/dev/null || true
+fi
+
+# ── 2. 守护进程与动态库 ──────────────────────────────────────────
+if [ -f "$BTDAEMON" ]; then
+    chown root:wheel "$BTDAEMON" 2>/dev/null || true
+    chmod 0755 "$BTDAEMON" 2>/dev/null || true
+fi
+if [ -f "$BTLIB" ]; then
+    chown root:wheel "$BTLIB" 2>/dev/null || true
+    chmod 0755 "$BTLIB" 2>/dev/null || true
+fi
+
+# ── 3. 把 plist 里的占位符换成真实 jbroot ────────────────────────
+if [ -f "$PLIST" ]; then
+    chown root:wheel "$PLIST" 2>/dev/null || true
+    chmod 0644 "$PLIST" 2>/dev/null || true
+    if grep -q '__JBROOT__' "$PLIST" 2>/dev/null; then
+        # BSD sed 要求 -i 带备份后缀参数，GNU sed 不接受；两种都试
+        sed -i '' "s#__JBROOT__#$JB#g" "$PLIST" 2>/dev/null \
+            || sed -i "s#__JBROOT__#$JB#g" "$PLIST" 2>/dev/null \
+            || echo "iCarpay: 警告，无法改写 $PLIST 中的 __JBROOT__"
+    fi
+fi
+
+# ── 4. 注册图标 ──────────────────────────────────────────────────
+UICACHE=""
+for t in "$JB/usr/bin/uicache" "$JB/bin/uicache" /usr/bin/uicache; do
+    if [ -x "$t" ]; then UICACHE="$t"; break; fi
+done
+if [ -n "$UICACHE" ] && [ -d "$APP" ]; then
+    "$UICACHE" --path "$APP" 2>/dev/null || true
+else
+    echo "iCarpay: 未找到 uicache（请安装 uikittools），桌面图标可能不出现"
+fi
+
+echo "iCarpay: 安装完成。首次使用请打开 App，按引导设置热点名称与密码。"
+exit 0

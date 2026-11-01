@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>platform-application</key>
+    <true/>
+    <!-- BAA / DeviceIdentity for auth-setup -->
+    <key>com.apple.mobileactivationd.spi</key>
+    <true/>
+    <key>com.apple.mobileactivationd.device-identifiers</key>
+    <true/>
+    <key>com.apple.mobileactivationd.deviceidentity</key>
+    <true/>
+    <key>com.apple.security.attestation.access</key>
+    <true/>
+    <key>com.apple.keystore.sik.access</key>
+    <true/>
+</dict>
+</plist>

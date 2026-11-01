@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Run as platform binary, no sandbox -->
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <!-- Allow spawning child processes from the app bundle -->
+    <key>com.apple.private.security.container-required</key>
+    <false/>
+    <!-- Open URLs (for prefs:root= deep link to Personal Hotspot) -->
+    <key>com.apple.private.applesupport.allow-url-handling</key>
+    <true/>
+    <!-- Pause other Wi-Fi networks while the radio hosts CarPlay -->
+    <key>com.apple.wifi.manager-access</key>
+    <true/>
+    <!-- Start and stop Personal Hotspot for the CarPlay session -->
+    <key>com.apple.MobileInternetSharing.allow</key>
+    <true/>
+    <!-- Read the device name, which is the hotspot's name (iOS 16+) -->
+    <key>com.apple.developer.device-information.user-assigned-device-name</key>
+    <true/>
+    <key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
+    <array>
+        <string>UserAssignedDeviceName</string>
+    </array>
+</dict>
+</plist>

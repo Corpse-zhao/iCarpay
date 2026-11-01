@@ -1,0 +1,23 @@
+#!/bin/sh
+# iCarpay postrm (roothide) —— 清运行时残留，刷新图标缓存
+set -e
+
+JB="$(pwd)"
+if [ ! -d "$JB/Applications" ]; then
+    if [ -n "$JBROOT" ] && [ -d "$JBROOT/Applications" ]; then
+        JB="$JBROOT"
+    elif [ -d /var/jb/Applications ]; then
+        JB="/var/jb"
+    fi
+fi
+
+rm -f /tmp/BTstack 2>/dev/null || true
+
+for t in "$JB/usr/bin/uicache" "$JB/bin/uicache" /usr/bin/uicache; do
+    if [ -x "$t" ]; then
+        "$t" -a 2>/dev/null || true
+        break
+    fi
+done
+
+exit 0

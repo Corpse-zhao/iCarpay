@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Filter</key>
+	<dict>
+		<key>Executables</key>
+		<array>
+			<string>mediaserverd</string>
+			<string>findmydeviced</string>
+			<string>sharingd</string>
+			<string>locationd</string>
+			<string>routined</string>
+			<string>tipsd</string>
+			<string>contextstored</string>
+			<string>cloudpaird</string>
+			<string>searchpartyd</string>
+			<string>identityservicesd</string>
+			<string>FindMyDeviceBluetoothExtension</string>
+			<string>bluetoothuserd</string>
+			<string>nearbyd</string>
+			<string>rapportd</string>
+			<string>wifid</string>
+		</array>
+	</dict>
+</dict>
+</plist>
