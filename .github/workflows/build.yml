@@ -177,6 +177,22 @@ jobs:
           APP="$P/Applications/iCarpay.app"
           mkdir -p "$APP" "$P/usr/bin" "$P/usr/share/icarpay" "$P/Library/LaunchDaemons"
 
+          # Info.plist 的版本必须跟 control 的 Version 一致。
+          # 之前 CFBundleShortVersionString 写死 0.1.7，包管理器显示的一直是旧版本，
+          # 跟 deb 元数据、诊断报告里的 version= 全都对不上。
+          python3 - "$PKG_VERSION" <<'PY'
+          import re, sys, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("build/payload/Applications/iCarpay.app/Info.plist")
+          s = p.read_text(encoding="utf-8")
+          s = re.sub(r"(<key>CFBundleShortVersionString</key>\s*<string>)[^<]*(</string>)",
+                     lambda m: m.group(1) + v + m.group(2), s)
+          s = re.sub(r"(<key>CFBundleVersion</key>\s*<string>)[^<]*(</string>)",
+                     lambda m: m.group(1) + v.replace(".", "") + m.group(2), s)
+          p.write_text(s, encoding="utf-8")
+          print("Info.plist version ->", v)
+          PY
+
           cp build/Showcase            "$APP/Showcase"
           cp build/CarDisplaySim       "$APP/CarDisplaySim"
           cp build/carplay_services    "$APP/CarPlay Simulator"

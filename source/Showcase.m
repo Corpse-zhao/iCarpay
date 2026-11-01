@@ -1153,6 +1153,12 @@ static NSString *bluetooth_diagnostic_report(
     [report appendFormat:@"btdaemon_pid=%d\n", g_btdaemon_pid];
     [report appendFormat:@"btstack_socket_meta=%@\n",
         file_fingerprint(BTSTACK_SOCKET)];
+    /* bluetoothd 只要还活着，Skywalk nexus 就一直 EBUSY，POWERON_FAILED 必现。
+     * 这一行直接告诉我们上一轮的「停蓝牙」有没有真的生效。 */
+    [report appendFormat:@"bluetoothd=%s\n",
+        process_named_running("bluetoothd")
+            ? "STILL-RUNNING (nexus busy, POWERON_FAILED guaranteed)"
+            : "gone"];
     [report appendFormat:@"guard_sh=%s\n", g_guard_sh_path ?: "(none)"];
     [report appendFormat:@"retry=%@\n", retryAttempted ? @"yes" : @"no"];
     if (initial.length)
@@ -2126,7 +2132,9 @@ static void signal_processes_named(const char *name, int sig, pid_t preservedPid
     free(procs);
 }
 
-#ifdef SHOWCASE_TAURINE
+/* 进程名探测。两个分支都要用：roothide 上停 bluetoothd 之前必须先确认
+ * 它真的死了 —— Skywalk nexus 是独占的，只要 bluetoothd 还在，
+ * os_channel_create 就返回 EBUSY(16)。 */
 static BOOL process_named_running(const char *name) {
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
     size_t len = 0;
@@ -2142,7 +2150,53 @@ static BOOL process_named_running(const char *name) {
     free(procs);
     return found;
 }
-#endif
+
+/* 彻底停掉 bluetoothd / BlueTool。
+ *
+ * 为什么不能只调 launchctl unload：
+ *   - iOS 16 的系统守护进程由 launchd 的 KeepAlive 守着，unload 系统卷里的
+ *     plist 在越狱环境下经常直接返回非 0 或被忽略；
+ *   - 即使进程暂时退出，launchd 也会立刻把它拉回来。
+ * Skywalk 的 nexus 一个 uuid 只允许一个 channel，bluetoothd 只要活着，
+ * BTstack 的 os_channel_create 就永远 EBUSY —— 这就是
+ * "skywalk: hci channel create failed errno=16 (Resource busy)" 的成因。
+ *
+ * 所以这里做三件事并验证结果：bootout 摘掉作业、unload 兼容老系统、
+ * 循环 SIGKILL 直到 sysctl 里真的查不到为止。 */
+static void stop_bluetoothd_hard(const char *launchctl) {
+    if (launchctl) {
+        char *bootoutArgv[] = { (char *)"launchctl", (char *)"bootout",
+                                (char *)"system/com.apple.bluetoothd", NULL };
+        ip_log("[BT] launchctl bootout bluetoothd rc=%d",
+               run_blocking(launchctl, bootoutArgv));
+
+        char *unloadArgv[] = { (char *)"launchctl", (char *)"unload",
+                               (char *)BLUETOOTHD_PLIST, NULL };
+        ip_log("[BT] launchctl unload bluetoothd rc=%d",
+               run_blocking(launchctl, unloadArgv));
+
+        char *unloadBtArgv[] = { (char *)"launchctl", (char *)"unload",
+                                 (char *)BLUETOOL_PLIST, NULL };
+        ip_log("[BT] launchctl unload BlueTool rc=%d",
+               run_blocking(launchctl, unloadBtArgv));
+    }
+
+    const char *names[] = { "bluetoothd", "BlueTool" };
+    for (int round = 0; round < 8; round++) {
+        BOOL any_alive = NO;
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            if (!process_named_running(names[i])) continue;
+            any_alive = YES;
+            signal_processes_named(names[i], SIGKILL, 0);
+        }
+        if (!any_alive) {
+            ip_log("[BT] bluetoothd/BlueTool gone (round %d)", round);
+            return;
+        }
+        usleep(400000);
+    }
+    ip_log("[BT] WARNING: bluetoothd/BlueTool still alive after 8 kill rounds");
+}
 
 #if !defined(SHOWCASE_TAURINE) && !defined(SHOWCASE_ROOTLESS)
 /* Taurine marks its install at the root and keeps jailbreakd in /taurine. */
@@ -4672,18 +4726,13 @@ static pid_t reusable_baa_broker(void) {
      * off, and BlueTool owns it on iOS 14 and newer. */
     [self stopSystemBluetooth:launchctl];
 #else
-    /* 1. Unload bluetoothd */
-    char *unloadArgv[] = { (char*)"launchctl", (char*)"unload",
-                           (char*)BLUETOOTHD_PLIST, NULL };
-    int rc = run_blocking(launchctl, unloadArgv);
-    if (rc != 0) ip_log("  WARNING: launchctl unload returned %d", rc);
-#ifdef SHOWCASE_ROOTLESS
-    char *unloadBlueToolArgv[] = { (char*)"launchctl", (char*)"unload",
-                                   (char*)BLUETOOL_PLIST, NULL };
-    rc = run_blocking(launchctl, unloadBlueToolArgv);
-    if (rc != 0) ip_log("  WARNING: BlueTool unload returned %d", rc);
-#endif
-    sleep(2);
+    /* 1. 停掉 bluetoothd，并且确认它真的死了。
+     *
+     * 原来这里只调 launchctl unload —— iOS 16 + roothide 上这条基本无效，
+     * bluetoothd 一直占着 Skywalk nexus，BTdaemon 的 os_channel_create
+     * 直接 EBUSY(16)，App 侧表现就是 POWERON_FAILED。 */
+    stop_bluetoothd_hard(launchctl);
+    sleep(1);
 
     /* 2. 清场，然后由我们自己拉起 BTdaemon。
      *
