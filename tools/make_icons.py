@@ -66,12 +66,46 @@ def resize(img, size):
     return img.resize((size, size), Image.LANCZOS)
 
 
-def build_oem_from_app(app_img):
-    """没有单独提供 OEM 图时，用 app 图标居中裁一块当车厂 logo。
-    留 8% 边距，避免在 CarPlay 的圆角裁切里被切掉。"""
+def trim_margin(img):
+    """裁掉四周的空白。
+
+    贴纸类源图自带一圈白边（还有角上的星星），做成 App 图标没问题，
+    但 CarPlay 的 OEM 槽位只有 104px，这圈留白会让图案看起来特别小。
+    有 alpha 就按 alpha 裁，否则按亮度裁（把接近纯白的当背景）。
+    """
+    img = img.convert("RGBA")
+    alpha = img.split()[-1]
+    bbox = alpha.getbbox()
+    if not bbox or bbox == (0, 0, img.width, img.height):
+        rgb = img.convert("RGB").convert("L")
+        mask = rgb.point(lambda v: 255 if v < 237 else 0)
+        bbox = mask.getbbox()
+    if not bbox:
+        return img
+    # 留一点点呼吸位，避免贴死在圆角裁切边上
+    pad = int(min(img.size) * 0.02)
+    left = max(0, bbox[0] - pad)
+    top = max(0, bbox[1] - pad)
+    right = min(img.width, bbox[2] + pad)
+    bottom = min(img.height, bbox[3] + pad)
+    return img.crop((left, top, right, bottom))
+
+
+def build_oem_from_app(app_img, fill=0.98, inset=0.10):
+    """没有单独提供 OEM 图时，用 app 图裁出主体当车厂 logo。
+
+    先 trim_margin 去掉源图自带的白边；再向内收 inset（贴纸四角的
+    星星会把裁剪框撑大，中心的脸反而显小）；最后放到 fill 比例的
+    方图里。这三步共同决定 CarPlay 左上角那个图标看起来有多大。
+    """
+    art = trim_margin(app_img)
+    w, h = art.size
+    dx, dy = int(w * inset), int(h * inset)
+    art = art.crop((dx, dy, w - dx, h - dy))
+    art = square(art)
     canvas = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-    inner = int(1024 * 0.84)
-    art = resize(app_img.convert("RGBA"), inner)
+    inner = max(1, int(1024 * fill))
+    art = resize(art, inner).convert("RGBA")
     off = (1024 - inner) // 2
     canvas.paste(art, (off, off), art)
     return canvas
@@ -81,6 +115,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--app", required=True, help="满版方形源图（>=512px）")
     ap.add_argument("--oem", help="透明底车厂 logo（可选）")
+    ap.add_argument("--oem-fill", type=float, default=0.96,
+                    help="OEM 图案占方图的比例，默认 0.96（越大越满）")
     ap.add_argument("--out", default="icon/generated", help="输出目录")
     args = ap.parse_args()
 
@@ -101,12 +137,9 @@ def main():
     if args.oem:
         if not os.path.exists(args.oem):
             sys.exit("找不到 OEM 源图: " + args.oem)
-        oem_src = Image.open(args.oem).convert("RGBA")
-        # OEM 图标本身就是 logo，不再加边距，保留原始留白
-        oem_src = square(oem_src)
-        oem_base = oem_src
+        oem_base = build_oem_from_app(Image.open(args.oem), args.oem_fill)
     else:
-        oem_base = build_oem_from_app(app_src)
+        oem_base = build_oem_from_app(app_src, args.oem_fill)
 
     print("-- CarPlay OEM --")
     for name, px in OEM_SIZES:

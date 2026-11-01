@@ -549,6 +549,11 @@ static BOOL start_bluetooth_guard(void) {
          "\"$2\" bootstrap system \"$5\" 2>/dev/null; "
          "\"$2\" load \"$5\" 2>/dev/null; "
          "\"$2\" load \"$4\" 2>/dev/null; "
+         /* bootstrap 返回 0 不代表 bluetoothd 真起来了。没起来就强制
+          * kickstart 一次。killall -0 只探测、不杀。 */
+         "if ! \"$7\" -0 bluetoothd 2>/dev/null; then "
+         "  \"$2\" kickstart -k system/com.apple.bluetoothd 2>/dev/null; "
+         "fi; "
          "rm -f \"$9\"; "
          "rm -f \"$6\"";
     /* 每个外部命令都先确认存在，roothide 的 jbroot 布局不能想当然 */
@@ -630,8 +635,25 @@ static void restore_system_bluetooth(const char *reason, BOOL disarmGuard) {
     int toolRc = run_blocking(launchctl, loadBlueTool);
 
     unlink(BT_OWNED_FLAG);
-    ip_log("[BT] system Bluetooth restored (%s): enable=%d bootstrap=%d load=%d BlueTool=%d guard=%s",
-           reason, enableRc, bootRc, daemonRc, toolRc, disarmGuard ? "disarmed" : "kept");
+
+    /* 恢复完必须复查。0.1.14 的教训：enable/bootstrap/load 全返回 0，
+     * 但 bluetoothd 根本没起来（拉起即崩，或 bootstrap 静默失败），
+     * 于是开关依旧是灰的，而日志里一行错误都没有。 */
+    BOOL up = process_named_running("bluetoothd");
+    if (!up) {
+        char *kickArgv[] = { (char *)"launchctl", (char *)"kickstart", (char *)"-k",
+                             (char *)"system/com.apple.bluetoothd", NULL };
+        int kickRc = run_blocking(launchctl, kickArgv);
+        for (int i = 0; i < 30 && !process_named_running("bluetoothd"); i++)
+            usleep(100000);
+        up = process_named_running("bluetoothd");
+        ip_log("[BT] bluetoothd kickstart rc=%d -> %s", kickRc,
+               up ? "running" : "STILL-DEAD");
+    }
+
+    ip_log("[BT] system Bluetooth restored (%s): enable=%d bootstrap=%d load=%d BlueTool=%d guard=%s bluetoothd=%s",
+           reason, enableRc, bootRc, daemonRc, toolRc,
+           disarmGuard ? "disarmed" : "kept", up ? "running" : "DEAD");
     if (disarmGuard) stop_bluetooth_guard();
 }
 
@@ -1143,6 +1165,14 @@ static NSString *bluetooth_diagnostic_report(
     NSString *daemon = bounded_log_tail(@SHOWCASE_BTSTACK_LOG_PATH, 8192, 18);
     NSString *daemonDirect = bounded_log_tail(
         [NSString stringWithUTF8String:log_path("BTdaemon-direct.log")], 8192, 14);
+    /* 「退出后蓝牙打不开 / 只有重启能好」这条线全在 app.log 与
+     * bluetooth-recovery.log 里：[HANDOFF] 有没有走到、[BT] restored 那行
+     * 的四个返回值、bluetoothd 最终是 running 还是 DEAD。报告里不带这两段，
+     * 每次都只能靠用户手抄，等于没有证据。 */
+    NSString *appLog = bounded_log_tail(
+        [NSString stringWithUTF8String:log_path("app.log")], 32768, 120);
+    NSString *guardLog = bounded_log_tail(
+        [NSString stringWithUTF8String:log_path("bluetooth-recovery.log")], 8192, 24);
     NSString *combined = [NSString stringWithFormat:@"%@\n%@\n%@\n%@",
                           initial ?: @"", retry ?: @"", daemon ?: @"",
                           daemonDirect ?: @""];
@@ -1159,6 +1189,22 @@ static NSString *bluetooth_diagnostic_report(
 #else
     NSString *layout = @"rootful";
 #endif
+
+    /* 只留和「蓝牙归还」相关的行，避免整份 app.log 淹掉报告 */
+    NSMutableArray<NSString *> *traceLines = [NSMutableArray array];
+    for (NSString *line in [appLog componentsSeparatedByString:@"\n"]) {
+        if ([line rangeOfString:@"[BT]"].location == NSNotFound &&
+            [line rangeOfString:@"[HANDOFF]"].location == NSNotFound &&
+            [line rangeOfString:@"[HOTSPOT]"].location == NSNotFound &&
+            [line rangeOfString:@"display profile"].location == NSNotFound)
+            continue;
+        [traceLines addObject:line];
+    }
+    if (traceLines.count > 80) {
+        traceLines = [[traceLines subarrayWithRange:
+            NSMakeRange(traceLines.count - 80, 80)] mutableCopy];
+    }
+    NSString *appTrace = [traceLines componentsJoinedByString:@"\n"];
 
     NSMutableString *report = [NSMutableString string];
     [report appendString:@"iCarpay Bluetooth compatibility report\n"];
@@ -1212,6 +1258,10 @@ static NSString *bluetooth_diagnostic_report(
         [report appendFormat:@"\nBTstack daemon tail:\n%@\n", daemon];
     if (daemonDirect.length)
         [report appendFormat:@"\nBTdaemon direct tail:\n%@\n", daemonDirect];
+    if (appTrace.length)
+        [report appendFormat:@"\napp.log trace ([BT]/[HANDOFF]/[HOTSPOT]):\n%@\n", appTrace];
+    if (guardLog.length)
+        [report appendFormat:@"\nbluetooth-recovery.log tail:\n%@\n", guardLog];
     return report;
 }
 
@@ -2198,6 +2248,21 @@ static BOOL process_named_running(const char *name) {
     }
     free(procs);
     return found;
+}
+
+/* 轮询等某个进程真的消失。
+ *
+ * 杀进程和释放内核通道不是同一件事：进程还在进程表里，说明它可能尚未走到
+ * exit，它持有的 Skywalk nexus 就还挂着。恢复 bluetoothd 之前必须等到它
+ * 真的消失，否则新起来的 bluetoothd 拿控制器照样 EBUSY/失败，然后退出 ——
+ * 表现就是「蓝牙开关灰掉，只有重启能好」。 */
+static BOOL wait_process_gone(const char *name, int seconds) {
+    for (int i = 0; i < seconds * 10; i++) {
+        if (!process_named_running(name)) return YES;
+        usleep(100000);
+    }
+    ip_log("[BT] %s still alive after %d sec", name, seconds);
+    return NO;
 }
 
 /* 彻底停掉 bluetoothd / BlueTool。
@@ -5091,6 +5156,9 @@ static pid_t reusable_baa_broker(void) {
          * 打不开」。会话已经在 Wi-Fi 上，蓝牙这一路彻底没用了，直接杀干净。 */
         kill_pid(self.btdaemonPid);
         signal_processes_named("BTdaemon", SIGKILL, 0);
+        /* 等它真的从进程表里消失再动 bluetoothd：Skywalk 通道要等进程
+         * 走到 exit 才释放，抢这两百毫秒会换来看似成功实则无效的恢复。 */
+        wait_process_gone("BTdaemon", 2);
         self.btdaemonPid = 0;
         g_btdaemon_pid = 0;
 
@@ -5130,6 +5198,7 @@ static pid_t reusable_baa_broker(void) {
          * 另外补一次按名字清场：launchd 拉起的情况下 pid 可能没被记到。 */
         kill_pid(self.btdaemonPid);
         signal_processes_named("BTdaemon", SIGKILL, 0);
+        wait_process_gone("BTdaemon", 2);
         self.btdaemonPid = 0;
         self.bluetoothHandedOff = NO;
 
