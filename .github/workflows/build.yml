@@ -60,6 +60,7 @@ jobs:
             "$BT/platform/daemon/src/daemon_cmds.c" \
             "$BT/platform/daemon/src/socket_connection.c" \
             "$BT/src/hci_cmd.c" \
+            "$BT/src/hci_dump.c" \
             "$BT/src/btstack_linked_list.c" \
             "$BT/src/btstack_util.c" \
             "$BT/src/btstack_run_loop.c" \
@@ -69,10 +70,12 @@ jobs:
             "$BT/platform/posix/btstack_run_loop_posix.c" \
             tools/btstack_legacy.c \
             -framework Foundation -framework CoreFoundation \
-            -Wl,-undefined,dynamic_lookup \
+            -Wl,-undefined,error \
             -install_name @loader_path/libBTstack.dylib \
             -o build/libBTstack.dylib
           lipo -info build/libBTstack.dylib
+          echo "--- libBTstack 未解析符号（应只有 /usr/lib、/System 里的系统符号） ---"
+          nm -u build/libBTstack.dylib | sed 's/^[[:space:]]*//' | sort -u
           # carplay_bt 引用的命令模板必须全部在库里，缺一个设备上就是 dyld 崩溃
           nm -gU build/libBTstack.dylib | grep -E 'btstack_set_(power_mode|discoverable|system_bluetooth)' || true
           for sym in hci_read_bd_addr hci_write_local_name hci_write_class_of_device \
@@ -85,7 +88,9 @@ jobs:
                      run_loop_init run_loop_execute run_loop_set_timer \
                      run_loop_set_timer_handler run_loop_add_timer \
                      run_loop_remove_timer bt_open bt_send_cmd \
-                     bt_register_packet_handler; do
+                     bt_send_rfcomm bt_send_l2cap bt_close \
+                     bt_register_packet_handler hci_cmd_create_from_template \
+                     socket_connection_init socket_connection_send_packet; do
             nm -gU build/libBTstack.dylib | grep -q "$sym\$" \
               || { echo "❌ libBTstack 缺符号: $sym"; exit 1; }
           done
@@ -101,24 +106,37 @@ jobs:
           OUT="$PWD/build/BTdaemon" \
             zsh btstack-rootless/build_btdaemon.sh
           lipo -info build/BTdaemon
+          # BTdaemon 是独立进程，用 dynamic_lookup 编出来的缺符号可执行文件
+          # 会在设备上启动即崩（dyld: missing symbol called，且不打印符号名）
+          echo "--- BTdaemon 未解析符号（应只有系统库） ---"
+          nm -u build/BTdaemon | sed 's/^[[:space:]]*//' | sort -u
+          if nm -u build/BTdaemon | grep -qE '^_?(bt_|hci_|rfcomm_|sdp_|l2cap_|run_loop_|btstack_|socket_connection_)'; then
+            echo "❌ BTdaemon 存在自身未解析的 BTstack 符号（会启动即崩）"
+            nm -u build/BTdaemon | grep -E '^_?(bt_|hci_|rfcomm_|sdp_|l2cap_|run_loop_|btstack_|socket_connection_)'
+            exit 1
+          fi
 
       # ── 3. 三个 App 内可执行体 ──
       - name: Build app binaries
         run: |
           set -euo pipefail
+          # ⚠️ 这里绝对不能出现 -Wl,-undefined,dynamic_lookup。
+          #    ld64 只要见过一次 dynamic_lookup，缺符号就会一路留到运行期，
+          #    真机上表现成无符号名的 "dyld: missing symbol called"，完全没法定位。
+          #    需要 dynamic_lookup 的产物（Showcase / carplay_services）单独加。
           CF="-fobjc-arc -miphoneos-version-min=12.0 -isysroot $SDK -O2 \
-              -Wno-deprecated-declarations -Wno-unused-command-line-argument \
-              -Wl,-undefined,dynamic_lookup"
+              -Wno-deprecated-declarations -Wno-unused-command-line-argument"
 
           # 主 App
           clang $CF -DSHOWCASE_ROOTLESS=1 \
             -DAPP_VERSION=\"$PKG_VERSION\" -DPACKAGE_VERSION=\"$PKG_VERSION\" \
             -o build/Showcase source/Showcase.m \
+            -Wl,-undefined,dynamic_lookup \
             -framework UIKit -framework AVFoundation -framework AudioToolbox \
             -framework CoreMedia -framework Foundation -framework Security
 
           # 蓝牙辅助（唯一链接 libBTstack 的）
-          # -undefined,error：缺符号在构建期就报错，别等到设备上 dyld 崩
+          # -undefined,error：缺符号必须在构建期炸，不许等到设备上 dyld 崩
           clang $CF -DSHOWCASE_ROOTLESS=1 \
             -o build/CarDisplaySim source/carplay_bt.m build/libBTstack.dylib \
             -Wl,-undefined,error \
@@ -130,10 +148,13 @@ jobs:
             source/vendor/monocypher/monocypher.c \
             source/vendor/monocypher/monocypher-ed25519.c \
             source/vendor/libtommath/tommath.c \
+            -Wl,-undefined,dynamic_lookup \
             -framework Foundation -framework Security
 
           for b in Showcase CarDisplaySim carplay_services; do
             echo "--- $b"; lipo -info "build/$b"
+            echo "--- $b 未解析符号（应只有系统库） ---"
+            nm -u "build/$b" 2>/dev/null | sed 's/^[[:space:]]*//' | sort -u || true
           done
 
       # ── 4. 组 payload（roothide：相对路径，不带 var/jb） ──
