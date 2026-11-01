@@ -47,6 +47,18 @@ if [ -f "$BTLIB" ]; then
     chmod 0755 "$BTLIB" 2>/dev/null || true
 fi
 
+# ── 2b. 清掉还在跑的旧 BTdaemon ──────────────────────────────────
+# dpkg 升级只会覆盖文件，不会杀进程。旧 BTdaemon 会一直占着 /tmp/BTstack，
+# 于是新装的 CarDisplaySim 连上去其实还在跟旧版本说话 —— 日志和行为全对不上。
+# App 启动时也会再清一次（kill_stale_btdaemon），这里只是提前把环境弄干净。
+for k in "$JB/usr/bin/killall" "$JB/bin/killall" /usr/bin/killall /bin/killall; do
+    if [ -x "$k" ]; then
+        "$k" -9 BTdaemon 2>/dev/null || true
+        break
+    fi
+done
+rm -f /tmp/BTstack 2>/dev/null || true
+
 # ── 3. 把 plist 里的占位符换成真实 jbroot ────────────────────────
 if [ -f "$PLIST" ]; then
     chown root:wheel "$PLIST" 2>/dev/null || true

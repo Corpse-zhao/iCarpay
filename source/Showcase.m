@@ -184,6 +184,10 @@ static void ip_log(const char *fmt, ...) {
 #define LOG_FILE_NAME   "app.log"
 static char g_log_dir[640] = LOG_DIR;
 
+/* 本次拉起的 BTdaemon pid。诊断报告里带上，用来区分「连到的是本次的
+ * daemon」还是「上次安装留下的僵尸进程」—— 后者会让所有日志都对不上。 */
+static int g_btdaemon_pid = 0;
+
 static const char *log_path(const char *name) {
     static char bufs[4][768];
     static int idx = 0;
@@ -1072,6 +1076,19 @@ static NSString *bluetooth_failure_class(NSString *reason,
     return @"bluetooth-takeover-failed";
 }
 
+/* 文件指纹（大小 + mtime）。诊断里用它判断两件事：
+ *   - BTdaemon 是不是本次安装的新二进制（大小变了就说明换过）
+ *   - /tmp/BTstack 是不是本次新建的（mtime 比进程还早 = 连着别人的 socket） */
+static NSString *file_fingerprint(const char *path) {
+    struct stat st;
+    if (!path || stat(path, &st) != 0) return @"missing";
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"MM-dd HH:mm:ss";
+    NSDate *mtime = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)st.st_mtime];
+    return [NSString stringWithFormat:@"size=%lld mtime=%@",
+            (long long)st.st_size, [fmt stringFromDate:mtime]];
+}
+
 static NSString *bluetooth_diagnostic_report(
     NSString *reason, BOOL retryAttempted,
     BluetoothRegistryProbeState registry) {
@@ -1132,6 +1149,10 @@ static NSString *bluetooth_diagnostic_report(
         ctlPath ?: "(none)", g_launchctl_tried];
     [report appendFormat:@"btstack_socket=%s exists=%s\n", BTSTACK_SOCKET,
         access(BTSTACK_SOCKET, F_OK) == 0 ? "yes" : "no"];
+    [report appendFormat:@"btdaemon_bin=%@\n", file_fingerprint(BTDAEMON_PATH)];
+    [report appendFormat:@"btdaemon_pid=%d\n", g_btdaemon_pid];
+    [report appendFormat:@"btstack_socket_meta=%@\n",
+        file_fingerprint(BTSTACK_SOCKET)];
     [report appendFormat:@"guard_sh=%s\n", g_guard_sh_path ?: "(none)"];
     [report appendFormat:@"retry=%@\n", retryAttempted ? @"yes" : @"no"];
     if (initial.length)
@@ -1971,6 +1992,29 @@ static pid_t spawn_daemon(const char *path, char *const argv[], const char *logf
         ip_log("  child still alive ✓");
     }
     return pid;
+}
+
+/* 升级 deb 之后，旧版 BTdaemon 进程很可能还活着。
+ *
+ * launchctl unload 只对 launchd 自己拉起的作业有效；由 App 直接 spawn 出来的
+ * 那个进程会一直占着 /tmp/BTstack，于是新装的 CarDisplaySim 连上去说话的对象
+ * 是一个旧二进制 —— 日志、行为、以及我们改的所有编译开关全都对不上号。
+ * 每次接管蓝牙前无条件清场，保证「装了什么就跑什么」。 */
+static void kill_stale_btdaemon(void) {
+    static const char *const jbRel[] = { "/usr/bin/killall", "/bin/killall",
+                                         "/usr/sbin/killall", NULL };
+    static const char *const sysAbs[] = { "/usr/bin/killall", "/bin/killall",
+                                          "/usr/sbin/killall", NULL };
+    const char *killallPath = first_existing_exec(jbRel, sysAbs);
+    if (!killallPath) {
+        ip_log("[BT] killall not found — stale BTdaemon may survive");
+        return;
+    }
+    char *argv[] = { (char *)"killall", (char *)"-9", (char *)"BTdaemon", NULL };
+    int rc = run_blocking(killallPath, argv);
+    /* 没有旧进程时 killall 返回 1，属于正常情况 */
+    ip_log("[BT] killall -9 BTdaemon rc=%d (1 = no stale process)", rc);
+    usleep(300000);
 }
 
 /* kill(pid, 0) succeeds for a zombie, so an exited helper looked alive until
@@ -4641,36 +4685,31 @@ static pid_t reusable_baa_broker(void) {
 #endif
     sleep(2);
 
-    /* 2. Start bundled BTstack through launchd so the advertised socket exists. */
+    /* 2. 清场，然后由我们自己拉起 BTdaemon。
+     *
+     * 早先这里走 launchctl load，让 launchd 代拉。两个坑：
+     *   - roothide 上升级 deb 后旧 BTdaemon 进程可能还活着（launchctl unload
+     *     不认非 launchd 拉起的进程），CarDisplaySim 会连到旧二进制上；
+     *   - launchd 拉起的 daemon 日志走 plist 的 StandardOutPath
+     *     (/var/log/BTstack.log)，诊断包抓不到，出问题就是黑盒。
+     * 改成先 killall 清场再 direct spawn，日志固定落在 LOG_DIR。 */
+    kill_stale_btdaemon();
+
     char *unloadBTstackArgv[] = { (char*)"launchctl", (char*)"unload",
                                   (char*)BTSTACK_PLIST, NULL };
     run_blocking(launchctl, unloadBTstackArgv);
     unlink(BTSTACK_SOCKET);
 
-    char *loadBTstackArgv[] = { (char*)"launchctl", (char*)"load",
-                                (char*)BTSTACK_PLIST, NULL };
-    rc = run_blocking(launchctl, loadBTstackArgv);
-    if (rc != 0) {
-        ip_log("  WARNING: launchctl load BTstack returned %d", rc);
-    }
-    self.btdaemonPid = 0;
-    if (!wait_for_path(BTSTACK_SOCKET, 8, "BTstack socket")) {
-        /* roothide 对 jbroot 内 LaunchDaemon 的处理与 rootless 不同，
-         * launchd 可能不代为创建 socket。BTdaemon 自己也会 bind 同一个
-         * 路径（btstack_server_run），所以直接以 root 身份拉起它。 */
-        ip_log("[BT] launchd did not expose %s; starting BTdaemon directly",
-               BTSTACK_SOCKET);
-        unlink(BTSTACK_SOCKET);
-        char *directArgv[] = { (char *)"BTdaemon", NULL };
-        self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, directArgv,
-                                        LOG_DIR "/BTdaemon-direct.log");
-        if (self.btdaemonPid <= 0 ||
-            !wait_for_path(BTSTACK_SOCKET, 10, "BTstack socket (direct)")) {
-            [self failBluetoothWithReason:
-                @"The BTstack daemon did not create its control socket."
-                                 unsupported:NO];
-            return;
-        }
+    char *directArgv[] = { (char *)"BTdaemon", NULL };
+    self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, directArgv,
+                                    LOG_DIR "/BTdaemon-direct.log");
+    g_btdaemon_pid = self.btdaemonPid;
+    if (self.btdaemonPid <= 0 ||
+        !wait_for_path(BTSTACK_SOCKET, 10, "BTstack socket")) {
+        [self failBluetoothWithReason:
+            @"The BTstack daemon did not create its control socket."
+                             unsupported:NO];
+        return;
     }
 #endif
 
