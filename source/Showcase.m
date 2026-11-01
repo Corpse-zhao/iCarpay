@@ -4771,9 +4771,15 @@ static pid_t reusable_baa_broker(void) {
         run_blocking(launchctl, unloadBTstackArgv);
         unlink(BTSTACK_SOCKET);
         sleep(2);
-        rc = run_blocking(launchctl, loadBTstackArgv);
-        if (rc == 0 &&
-            wait_for_path(BTSTACK_SOCKET, 8, "BTstack retry socket")) {
+        /* 重试路径也要清场 + 直接拉起，理由同首次启动：不能连到旧 daemon，
+         * 也不能让日志跑进 /var/log。 */
+        kill_stale_btdaemon();
+        char *retryDirectArgv[] = { (char *)"BTdaemon", NULL };
+        self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, retryDirectArgv,
+                                        LOG_DIR "/BTdaemon-direct.log");
+        g_btdaemon_pid = self.btdaemonPid;
+        if (self.btdaemonPid > 0 &&
+            wait_for_path(BTSTACK_SOCKET, 10, "BTstack retry socket")) {
             unlink(BT_READY_PATH);
             self.carplayBtPid =
                 spawn_daemon([btPath UTF8String], btArgv,
