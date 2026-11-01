@@ -121,9 +121,9 @@ static NSString *L(NSString *english) {
  * Application logger
  * ═══════════════════════════════════════════════════════════════ */
 
-#define LOG_DIR     "/var/mobile/Library/Showcase/logs"
+#define LOG_DIR     "/var/mobile/Library/iCarpay/logs"
 #define APP_LOG     LOG_DIR "/app.log"
-#define TCPDUMP_DIR  "/var/mobile/Library/Showcase/dumps"
+#define TCPDUMP_DIR  "/var/mobile/Library/iCarpay/dumps"
 #define TCPDUMP_LOG  TCPDUMP_DIR "/tcpdump.log"
 #define TCPDUMP_MAX_SECONDS 300
 #define DIAGNOSTICS_ENABLED_KEY @"diagnosticsEnabled"
@@ -144,7 +144,7 @@ static NSString *L(NSString *english) {
 #define USAGE_ID_KEY            @"anonymousUsageID"
 #define USAGE_SENT_KEY          @"anonymousUsageSentPayload"
 #define USAGE_SENT_DATE_KEY     @"anonymousUsageSentDate"
-#define GITHUB_URL              @"https://github.com/amineross/showcase"
+#define GITHUB_URL              @"https://github.com/Corpse-zhao/iCarpay"
 #define MIS_STATE_OFF           1022
 #define MIS_STATE_ON            1023
 #define SHOWCASE_BT_PROGRESS_NOTIFICATION "com.rostane.showcase.bt-progress"
@@ -178,21 +178,112 @@ static void ip_log(const char *fmt, ...) {
     fflush(g_logfile);
 }
 
+/* 日志目录运行时可变：越狱设备走 /var/mobile/Library/iCarpay/logs，
+ * 沙盒环境（IPA / 非 root 启动）那里不可写，退到 app 容器内，
+ * 否则 g_logfile 为 NULL，全部日志被静默丢弃，故障无从查起。 */
+#define LOG_FILE_NAME   "app.log"
+static char g_log_dir[640] = LOG_DIR;
+
+static const char *log_path(const char *name) {
+    static char bufs[4][768];
+    static int idx = 0;
+    char *b = bufs[idx];
+    idx = (idx + 1) & 3;
+    snprintf(b, sizeof(bufs[0]), "%s/%s", g_log_dir, name);
+    return b;
+}
+
 static void ip_log_open(void) {
-    mkdir("/var/mobile/Library/Showcase", 0755);
+    mkdir("/var/mobile/Library/iCarpay", 0755);
     mkdir(LOG_DIR, 0755);
     g_logfile = fopen(APP_LOG, "a");
+    if (!g_logfile) {
+        NSString *dir = [NSSearchPathForDirectoriesInDomains(
+            NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
+        dir = [dir stringByAppendingPathComponent:@"iCarpay/logs"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil error:nil];
+        snprintf(g_log_dir, sizeof(g_log_dir), "%s", dir.fileSystemRepresentation);
+        g_logfile = fopen(log_path(LOG_FILE_NAME), "a");
+    }
     if (g_logfile) {
-        fprintf(g_logfile, "\n══════════════ Showcase launch ══════════════\n");
+        fprintf(g_logfile, "\n══════════════ iCarpay launch ══════════════\n");
         fflush(g_logfile);
     }
+    ip_log("log dir = %s", g_log_dir);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * jbroot 解析（roothide 适配的核心）
+ *
+ * roothide 的 jbroot 是随机化路径，不是 /var/jb。上游 Showcase 把
+ * 前缀写成编译期常量，在 roothide 上所有 <jb>/usr/bin/BTdaemon、
+ * <jb>/Library/LaunchDaemons/... 全部 stat 失败，于是报
+ * 「The BTstack daemon is missing or is not executable」。
+ *
+ * 解析顺序：
+ *   1) 环境变量 JBROOT_PATH
+ *   2) 从自身 bundlePath 反推：<jbroot>/Applications/<x>.app
+ *   3) /var/jb 兜底（Dopamine / palera1n rootless）
+ *   4) 空串（rootful）
+ * ═══════════════════════════════════════════════════════════════ */
+
+static char g_jbroot[1024];
+
+static void jbroot_resolve(void) {
+    if (g_jbroot[0]) return;
+
+    const char *env = getenv("JBROOT_PATH");
+    if (env && env[0] == '/' && access(env, F_OK) == 0) {
+        snprintf(g_jbroot, sizeof(g_jbroot), "%s", env);
+        return;
+    }
+
+    NSString *bundle = [[NSBundle mainBundle] bundlePath];
+    NSRange marker = [bundle rangeOfString:@"/Applications/"];
+    if (marker.location != NSNotFound && marker.location > 1) {
+        NSString *root = [bundle substringToIndex:marker.location];
+        if (access(root.fileSystemRepresentation, F_OK) == 0) {
+            snprintf(g_jbroot, sizeof(g_jbroot), "%s", root.fileSystemRepresentation);
+            return;
+        }
+    }
+
+#ifdef SHOWCASE_ROOTLESS
+    snprintf(g_jbroot, sizeof(g_jbroot), "/var/jb");
+#else
+    g_jbroot[0] = '\0';
+#endif
+}
+
+static const char *jbroot_prefix(void) {
+    jbroot_resolve();
+    return g_jbroot;
+}
+
+/* 返回值会被放进 argv[] 长期持有（posix_spawn、launchctl 参数），
+ * 所以每条都单独分配并保留到进程结束，避免共享缓冲导致的别名错乱。 */
+static const char *jb_path(const char *relative) {
+    static char *kept[256];
+    static int count = 0;
+    char buf[1280];
+    int n = snprintf(buf, sizeof(buf), "%s%s", jbroot_prefix(), relative);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    char *copy = (char *)malloc((size_t)n + 1);
+    if (!copy) return relative;
+    memcpy(copy, buf, (size_t)n);
+    copy[n] = '\0';
+    if (count < (int)(sizeof(kept) / sizeof(kept[0]))) kept[count++] = copy;
+    return copy;
 }
 
 /* ═══════════════════════════════════════════════════════════════
  * Configuration
  * ═══════════════════════════════════════════════════════════════ */
 
-#define APP_NAME          "Showcase"
+#define APP_NAME          "iCarpay"
 /* Release builds pass APP_VERSION from the VERSION file. */
 #ifndef APP_VERSION
 #define APP_VERSION       "development"
@@ -200,29 +291,20 @@ static void ip_log_open(void) {
 #ifndef PACKAGE_VERSION
 #define PACKAGE_VERSION   "development"
 #endif
-#define APP_AUTHOR        "Amine Rostane"
+#define APP_AUTHOR        "Corpse-zhao"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
 #define BT_READY_PATH     "/tmp/showcase_bt_ready"
 #define BLUETOOL_PLIST    "/System/Library/LaunchDaemons/com.apple.BlueTool.plist"
-#ifdef SHOWCASE_ROOTLESS
-#define JB_PREFIX         "/var/jb"
+/* roothide 的 jbroot 前缀在运行时解析（见 jbroot_prefix），
+ * 不再用编译期常量写死 /var/jb —— 那是 deb 版找不到 BTdaemon 的根因。 */
+#define JB_PATH(path)     jb_path(path)
 #ifndef SHOWCASE_BTSTACK_PLIST
 #define SHOWCASE_BTSTACK_PLIST JB_PATH("/Library/LaunchDaemons/ch.ringwald.BTstack.plist")
 #endif
 #ifndef SHOWCASE_BTSTACK_SOCKET
 #define SHOWCASE_BTSTACK_SOCKET "/tmp/BTstack"
 #endif
-#else
-#define JB_PREFIX         ""
-#ifndef SHOWCASE_BTSTACK_PLIST
-#define SHOWCASE_BTSTACK_PLIST "/Library/LaunchDaemons/ch.ringwald.BTstack.plist"
-#endif
-#ifndef SHOWCASE_BTSTACK_SOCKET
-#define SHOWCASE_BTSTACK_SOCKET "/tmp/BTstack"
-#endif
-#endif
-#define JB_PATH(path)     JB_PREFIX path
 #define BTSTACK_PLIST     SHOWCASE_BTSTACK_PLIST
 #define BTSTACK_SOCKET    SHOWCASE_BTSTACK_SOCKET
 #ifndef SHOWCASE_BTDAEMON_PATH
@@ -919,7 +1001,7 @@ static NSString *bluetooth_diagnostic_report(
 #endif
 
     NSMutableString *report = [NSMutableString string];
-    [report appendString:@"Showcase Bluetooth compatibility report\n"];
+    [report appendString:@"iCarpay Bluetooth compatibility report\n"];
     [report appendFormat:@"version=%s\n", APP_VERSION];
     [report appendFormat:@"device=%@\n", hardware_machine_identifier()];
     [report appendFormat:@"ios=%@\n", [UIDevice currentDevice].systemVersion];
@@ -927,6 +1009,7 @@ static NSString *bluetooth_diagnostic_report(
     [report appendFormat:@"failure_class=%@\n", failureClass];
     [report appendFormat:@"stage=%@\n", reason ?: @"unknown"];
     [report appendFormat:@"euid=%u\n", geteuid()];
+    [report appendFormat:@"jbroot=%s\n", jbroot_prefix()];
     [report appendFormat:@"registry=%@\n", registryText];
     [report appendFormat:@"helper=%s executable=%s\n", BT_HELPER_NAME,
         access([[[[NSBundle mainBundle] bundlePath]
@@ -1732,8 +1815,17 @@ static int run_capture(const char *path, char *const argv[], const char *outfile
 }
 
 static pid_t spawn_daemon(const char *path, char *const argv[], const char *logfile) {
-    mkdir("/var/mobile/Library/Showcase", 0755);
+    mkdir("/var/mobile/Library/iCarpay", 0755);
     mkdir(LOG_DIR, 0755);
+
+    /* 日志目录已退到容器内时，调用点传来的 LOG_DIR/xxx.log 也要跟着搬过去 */
+    char remapped[768];
+    if (strcmp(g_log_dir, LOG_DIR) != 0 &&
+        strncmp(logfile, LOG_DIR, strlen(LOG_DIR)) == 0) {
+        snprintf(remapped, sizeof(remapped), "%s%s",
+                 g_log_dir, logfile + strlen(LOG_DIR));
+        logfile = remapped;
+    }
 
     if (access(path, X_OK) != 0) {
         ip_log("spawn_daemon: %s NOT EXECUTABLE (%s)", path, strerror(errno));
@@ -4329,7 +4421,7 @@ static pid_t reusable_baa_broker(void) {
 
     if (geteuid() != 0) {
         [self failBluetoothWithReason:
-            @"The Showcase executable is not running as root (setuid setup failed)."
+            @"The iCarpay executable is not running as root (setuid setup failed)."
                              unsupported:NO];
         return;
     }
@@ -4345,7 +4437,11 @@ static pid_t reusable_baa_broker(void) {
                              unsupported:NO];
         return;
     }
-    if (access(BTSTACK_DYLIB_PATH, R_OK) != 0) {
+    /* libBTstack.dylib 既可放在 <jbroot>/usr/lib，也可以留在 app 包内，
+     * 任一位置可读即可（CarDisplaySim 用 @loader_path 找包内那份）。 */
+    NSString *dylibInBundle = [bundlePath stringByAppendingPathComponent:@"libBTstack.dylib"];
+    if (access(BTSTACK_DYLIB_PATH, R_OK) != 0 &&
+        access([dylibInBundle fileSystemRepresentation], R_OK) != 0) {
         [self failBluetoothWithReason:
             @"The bundled BTstack library is missing or is not readable."
                              unsupported:NO];
@@ -4368,7 +4464,7 @@ static pid_t reusable_baa_broker(void) {
                        ? "supported-transport-missing" : "unavailable")));
     if (registry == BluetoothRegistryProbeMissing) {
         [self failBluetoothWithReason:
-            @"The Bluetooth transport required by Showcase is not present in IOKit."
+            @"The Bluetooth transport required by iCarpay is not present in IOKit."
                              unsupported:YES];
         return;
     }
@@ -5078,7 +5174,7 @@ static NSString *hotspot_name(void) {
     NSArray<NSString *> *paths = @[
         @LOG_DIR,
         @TCPDUMP_DIR,
-        @"/var/mobile/Library/Showcase/diagnostics",
+        @"/var/mobile/Library/iCarpay/diagnostics",
         @"/tmp/hci_dump.pklg",
         @SHOWCASE_BTSTACK_LOG_PATH
     ];
@@ -5128,7 +5224,7 @@ static NSString *hotspot_name(void) {
     const char *tcpdump = tcpdump_tool_path();
     if (!tcpdump) return NO;
 
-    mkdir("/var/mobile/Library/Showcase", 0755);
+    mkdir("/var/mobile/Library/iCarpay", 0755);
     mkdir(TCPDUMP_DIR, 0755);
 
     pid_t pid = 0;
@@ -5302,16 +5398,16 @@ static NSString *hotspot_name(void) {
     }
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *base = @"/var/mobile/Library/Showcase/diagnostics";
+    NSString *base = @"/var/mobile/Library/iCarpay/diagnostics";
     [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
 
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.dateFormat = @"yyyyMMdd-HHmmss";
     NSString *stamp = [fmt stringFromDate:[NSDate date]];
     NSString *work = [base stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"ShowcaseDiagnostics-%@", stamp]];
+        [NSString stringWithFormat:@"iCarpayDiagnostics-%@", stamp]];
     NSString *archive = [base stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"ShowcaseDiagnostics-%@.tar", stamp]];
+        [NSString stringWithFormat:@"iCarpayDiagnostics-%@.tar", stamp]];
     [fm removeItemAtPath:work error:nil];
     [fm removeItemAtPath:archive error:nil];
     [fm createDirectoryAtPath:work withIntermediateDirectories:YES attributes:nil error:nil];
@@ -5352,7 +5448,7 @@ static NSString *hotspot_name(void) {
     const char *lsPath = first_existing_tool(lsPaths);
 
     NSMutableString *env = [NSMutableString string];
-    [env appendFormat:@"Showcase diagnostics\n"];
+    [env appendFormat:@"iCarpay diagnostics\n"];
     [env appendFormat:@"version=%s\n", APP_VERSION];
 #ifdef SHOWCASE_ROOTLESS
     [env appendString:@"layout=rootless\n"];
@@ -5399,7 +5495,7 @@ static NSString *hotspot_name(void) {
     [self copyPath:[NSString stringWithUTF8String:BTSTACK_PLIST]
   toDiagnosticsDir:work name:@"BTstack-launchdaemon.plist"];
     [self copyPath:[[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"Info.plist"]
-  toDiagnosticsDir:work name:@"Showcase-Info.plist"];
+  toDiagnosticsDir:work name:@"iCarpay-Info.plist"];
 
     if (unamePath) {
         char *argv[] = { (char*)"uname", (char*)"-a", NULL };
