@@ -127,13 +127,13 @@ extern const void *hci_write_extended_inquiry_response, *hci_write_simple_pairin
 extern const void *hci_accept_connection_request;
 extern const void *hci_disconnect;
 extern const void *hci_io_capability_request_reply, *hci_user_confirmation_request_reply;
-extern const void *rfcomm_register_service, *rfcomm_accept_connection;
-extern const void *rfcomm_create_channel, *sdp_client_query_rfcomm_services;
+extern const void *rfcomm_register_service_cmd, *rfcomm_accept_connection_cmd;
+extern const void *rfcomm_create_channel_cmd, *sdp_client_query_rfcomm_services_cmd;
 extern void run_loop_set_timer(void *timer, uint32_t milliseconds);
 extern void run_loop_set_timer_handler(void *timer, void (*handler)(void *timer));
 extern void run_loop_add_timer(void *timer);
 extern int  run_loop_remove_timer(void *timer);
-extern const void *sdp_register_service_record;
+extern const void *sdp_register_service_record_cmd;
 extern const void *hci_read_bd_addr;
 
 #define R16(b,p) (((uint16_t)(b)[(p)+1])<<8|(b)[(p)])
@@ -404,11 +404,11 @@ static void perform_bt_setup(void) {
     bt_send_cmd(&hci_read_bd_addr);
     uint8_t eir[240]; build_eir(eir);
     bt_send_cmd(&hci_write_extended_inquiry_response,0,eir);
-    bt_send_cmd(&rfcomm_register_service,3,0xffff);
+    bt_send_cmd(&rfcomm_register_service_cmd,3,0xffff);
     build_sdp(sdp_rec,3);
-    bt_send_cmd(&sdp_register_service_record,sdp_rec);
+    bt_send_cmd(&sdp_register_service_record_cmd,sdp_rec);
     build_did_sdp(did_sdp_rec);
-    bt_send_cmd(&sdp_register_service_record,did_sdp_rec);
+    bt_send_cmd(&sdp_register_service_record_cmd,did_sdp_rec);
     bt_send_cmd(&btstack_set_discoverable,1);
     printf("[CP] READY — identity: RoadLink / RL-100 / RoadLink Labs\n");
     load_last_iphone();
@@ -485,7 +485,7 @@ static void page_iphone(void) {
     page_busy = 1;
     page_channel = 0;
     printf("[PAGE] looking for the iPhone's iAP2 service\n");
-    bt_send_cmd(&sdp_client_query_rfcomm_services, page_addr, iap2_device_pattern);
+    bt_send_cmd(&sdp_client_query_rfcomm_services_cmd, page_addr, iap2_device_pattern);
 }
 
 static void rfcomm_send_chunked(uint8_t *data, int len) {
@@ -1439,7 +1439,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
         if (!page_busy) break;
         if (page_channel && !active_cid) {
             printf("[PAGE] opening iAP2 to the iPhone\n");
-            bt_send_cmd(&rfcomm_create_channel, page_addr, page_channel);
+            bt_send_cmd(&rfcomm_create_channel_cmd, page_addr, page_channel);
         } else {
             page_busy = 0;
             printf("[PAGE] iPhone not reachable (status=0x%02X); retrying\n", sz >= 3 ? pkt[2] : 0xff);
@@ -1448,7 +1448,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
         break;
     case 0x82:{
         uint16_t c=R16(pkt,9);
-        bt_send_cmd(&rfcomm_accept_connection,c);
+        bt_send_cmd(&rfcomm_accept_connection_cmd,c);
         printf("[CP] RFCOMM IN\n");
         break;
     }
