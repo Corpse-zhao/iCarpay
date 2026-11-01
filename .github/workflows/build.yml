@@ -177,6 +177,12 @@ jobs:
           APP="$P/Applications/iCarpay.app"
           mkdir -p "$APP" "$P/usr/bin" "$P/usr/share/icarpay" "$P/Library/LaunchDaemons"
 
+          cp build/Showcase            "$APP/Showcase"
+          cp build/CarDisplaySim       "$APP/CarDisplaySim"
+          cp build/carplay_services    "$APP/CarPlay Simulator"
+          cp build/libBTstack.dylib    "$APP/libBTstack.dylib"
+          cp source/Info.plist         "$APP/Info.plist"
+
           # Info.plist 的版本必须跟 control 的 Version 一致。
           # 之前 CFBundleShortVersionString 写死 0.1.7，包管理器显示的一直是旧版本，
           # 跟 deb 元数据、诊断报告里的 version= 全都对不上。
@@ -193,11 +199,6 @@ jobs:
           print("Info.plist version ->", v)
           PY
 
-          cp build/Showcase            "$APP/Showcase"
-          cp build/CarDisplaySim       "$APP/CarDisplaySim"
-          cp build/carplay_services    "$APP/CarPlay Simulator"
-          cp build/libBTstack.dylib    "$APP/libBTstack.dylib"
-          cp source/Info.plist         "$APP/Info.plist"
           cp icon/generated/*.png      "$APP/"
           cp -R source/Localizations/*.lproj "$APP/"
           cp source/ent_*.xml          "$P/usr/share/icarpay/"
