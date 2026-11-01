@@ -178,6 +178,18 @@ static void ip_log(const char *fmt, ...) {
     fflush(g_logfile);
 }
 
+/* 启动耗时埋点。
+ *
+ * app.log 每行已经有 mono 时间戳，但一串数字不便于对比「哪一段最慢」。
+ * 这里额外打一个相对本次启动的偏移，日志里直接看到 [T+ 2.13s] xxx 这样的行，
+ * 优化时不用再手动做减法。 */
+static double g_boot_t0 = 0;
+static void boot_mark(const char *tag) {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (g_boot_t0 <= 0) g_boot_t0 = now;
+    ip_log("[T+%5.2fs] %s", now - g_boot_t0, tag);
+}
+
 /* 日志目录运行时可变：越狱设备走 /var/mobile/Library/iCarpay/logs，
  * 沙盒环境（IPA / 非 root 启动）那里不可写，退到 app 容器内，
  * 否则 g_logfile 为 NULL，全部日志被静默丢弃，故障无从查起。 */
@@ -1994,7 +2006,7 @@ static pid_t spawn_daemon(const char *path, char *const argv[], const char *logf
     }
     ip_log("  pid=%d log=%s", pid, logfile);
 
-    usleep(200000);
+    usleep(100000);
     if (kill(pid, 0) != 0) {
         ip_log("  CHILD ALREADY DEAD — check %s", logfile);
     } else {
@@ -2023,7 +2035,7 @@ static void kill_stale_btdaemon(void) {
     int rc = run_blocking(killallPath, argv);
     /* 没有旧进程时 killall 返回 1，属于正常情况 */
     ip_log("[BT] killall -9 BTdaemon rc=%d (1 = no stale process)", rc);
-    usleep(300000);
+    usleep(150000);
 }
 
 /* kill(pid, 0) succeeds for a zombie, so an exited helper looked alive until
@@ -2196,7 +2208,7 @@ static void stop_bluetoothd_hard(const char *launchctl) {
             ip_log("[BT] bluetoothd/BlueTool gone (round %d)", round);
             return;
         }
-        usleep(400000);
+        usleep(200000);
     }
     ip_log("[BT] WARNING: bluetoothd/BlueTool still alive after 8 kill rounds");
 }
@@ -2220,7 +2232,7 @@ static void reap_stale_helpers(pid_t preservedPid) {
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         signal_processes_named(names[i], SIGTERM, preservedPid);
-    usleep(700000);
+    usleep(300000);
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         signal_processes_named(names[i], SIGKILL, preservedPid);
     if (preservedPid <= 0)
@@ -4695,9 +4707,11 @@ static pid_t reusable_baa_broker(void) {
         disable_btstack_hci_logging();
     }
     self.helpersLoggedThisRun = self.diagnosticsEnabled;
+    boot_mark("bt takeover enter");
     unlink(BT_READY_PATH);
 
     reap_stale_helpers(self.baaBrokerPid);
+    boot_mark("stale helpers reaped");
 
     ensure_btstack_plist();
 
@@ -4716,6 +4730,7 @@ static pid_t reusable_baa_broker(void) {
     if (!start_bluetooth_guard()) {
         ip_log("[BT] WARNING: proceeding without crash recovery guard");
     }
+    boot_mark("crash guard ready");
 #ifdef SHOWCASE_TAURINE
     /* 1. Start the bundled BTstack daemon while launchd still spawns jobs.
      * On iOS 14 (Taurine) unloading bluetoothd leaves the unload "in
@@ -4735,7 +4750,7 @@ static pid_t reusable_baa_broker(void) {
      * bluetoothd 一直占着 Skywalk nexus，BTdaemon 的 os_channel_create
      * 直接 EBUSY(16)，App 侧表现就是 POWERON_FAILED。 */
     stop_bluetoothd_hard(launchctl);
-    sleep(1);
+    boot_mark("bluetoothd cleared");
 
     /* 2. 清场，然后由我们自己拉起 BTdaemon。
      *
@@ -4763,6 +4778,7 @@ static pid_t reusable_baa_broker(void) {
                              unsupported:NO];
         return;
     }
+    boot_mark("btdaemon socket ready");
 #endif
 
     /* 3. Spawn carplay_bt with car name + global AP creds */
@@ -4791,6 +4807,7 @@ static pid_t reusable_baa_broker(void) {
                              unsupported:YES];
         return;
     }
+    boot_mark("carplay_bt spawned");
     if (!wait_for_bt_ready_or_exit(self.carplayBtPid, BT_READY_SECONDS)) {
         /* On some rootless boots BlueTool releases the controller after its
          * launchd job has already exited. BTstack then accepts a client and

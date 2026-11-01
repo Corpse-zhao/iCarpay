@@ -163,7 +163,10 @@ static uint8_t iap2_detect[] = { 0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10 };
  * the phone does not reconnect on its own. The last iPhone that passed
  * authentication is remembered and paged until it connects. */
 #define LAST_IPHONE_PATH "/var/mobile/Library/Showcase/last-iphone"
-#define PAGE_RETRY_MS 10000
+/* 连接请求（page）重试间隔。原来 10 秒 —— 第一次 page 若撞上 iPhone 刚好
+ * 在扫描窗口外，就要干等 10 秒才重试，体感上就是「连得很慢」。3 秒足够
+ * 避开蓝牙 page 的冲突窗口，又不会造成风暴。 */
+#define PAGE_RETRY_MS 3000
 static uint8_t page_addr[6];            /* display order */
 static int page_known = 0, page_busy = 0, page_channel = 0, timer_armed = 0;
 static uint8_t peer_addr[6];            /* peer of the open channel, display order */
@@ -1516,7 +1519,10 @@ int main(int argc, char *argv[]) {
         bt_register_packet_handler(handler);
         int sysbt_rc = bt_send_cmd(&btstack_set_system_bluetooth_enabled,0);
         printf("[BT] btstack_set_system_bluetooth_enabled(0) rc=%d\n", sysbt_rc);
-        sleep(3);
+        /* 原来这里 sleep(3)：等系统蓝牙状态变化完。0.1.10 起 Showcase 已经在
+         * 拉起本进程之前把 bluetoothd 杀干净并确认过，Skywalk 通道本来就是空的，
+         * 等 3 秒纯属白等。给 daemon 一个处理窗口即可。 */
+        usleep(300000);
         int power_rc = bt_send_cmd(&btstack_set_power_mode,1);
         printf("[BT] btstack_set_power_mode rc=%d\n", power_rc);
         run_loop_execute();

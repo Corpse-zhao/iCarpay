@@ -612,6 +612,9 @@ int btstack_control_iphone_bt_enabled(void){
 void btstack_control_iphone_bt_set_enabled(int enabled)
 {
     SBA_setBluetoothEnabled(enabled);
-    sleep(2); // give change a chance
+    /* 原来 sleep(2)。SBA_setBluetoothEnabled 是同步 mach 调用，返回时
+     * SpringBoard 已经收到请求；而 iCarpay 在拉起 BTdaemon 之前就已经把
+     * bluetoothd 杀掉并确认过，不需要再留 2 秒等系统状态迁移。 */
+    usleep(300000); // give change a chance
 }
 
