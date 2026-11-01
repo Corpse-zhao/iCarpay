@@ -602,7 +602,10 @@ static BOOL start_bluetooth_guard(void) {
     return NO;
 }
 
-static void restore_system_bluetooth(const char *reason) {
+/* disarmGuard = NO 用于 Wi-Fi handoff：那时 CarPlay 会话还在跑，用户随时可能
+ * 从多任务里划掉 App（force-quit 不会走 stopFlow）。guard 是唯一能在那条路径上
+ * 收拾残局的角色，绝不能提前卸掉。 */
+static void restore_system_bluetooth(const char *reason, BOOL disarmGuard) {
     const char *launchctl = launchctl_path();
     if (!launchctl) return;
 
@@ -627,9 +630,9 @@ static void restore_system_bluetooth(const char *reason) {
     int toolRc = run_blocking(launchctl, loadBlueTool);
 
     unlink(BT_OWNED_FLAG);
-    ip_log("[BT] system Bluetooth restored (%s): enable=%d bootstrap=%d load=%d BlueTool=%d",
-           reason, enableRc, bootRc, daemonRc, toolRc);
-    stop_bluetooth_guard();
+    ip_log("[BT] system Bluetooth restored (%s): enable=%d bootstrap=%d load=%d BlueTool=%d guard=%s",
+           reason, enableRc, bootRc, daemonRc, toolRc, disarmGuard ? "disarmed" : "kept");
+    if (disarmGuard) stop_bluetooth_guard();
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3704,7 +3707,7 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
             run_blocking(launchctl, unloadBTstack);
             unlink(BTSTACK_SOCKET);
         }
-        restore_system_bluetooth("launch recovery");
+        restore_system_bluetooth("launch recovery", YES);
     });
     self.cars = [[CarStore alloc] init];
 
@@ -5082,12 +5085,21 @@ static pid_t reusable_baa_broker(void) {
         }
         unlink(BTSTACK_SOCKET);
 
+        /* BTdaemon 是独立进程，不跟着 carplay_bt 走。上面那句 unload 只是让
+         * launchd 别再拉起它 —— 已经在跑的那个还活着，还攥着 Skywalk 的 HCI
+         * nexus。bluetoothd 就算恢复了也用不了控制器，表现就是「蓝牙开关转圈 /
+         * 打不开」。会话已经在 Wi-Fi 上，蓝牙这一路彻底没用了，直接杀干净。 */
+        kill_pid(self.btdaemonPid);
+        signal_processes_named("BTdaemon", SIGKILL, 0);
+        self.btdaemonPid = 0;
+        g_btdaemon_pid = 0;
+
         self.bluetoothHandedOff = YES;
         ip_log("[HANDOFF] Bluetooth transport stopped (BTstack unload=%d)", rc);
         /* The session now runs over Wi-Fi alone. Leaving bluetoothd unloaded
          * would keep launchd and mediaserverd busy for the whole session,
          * about one core of a two-core receiver. */
-        restore_system_bluetooth("Wi-Fi handoff complete");
+        restore_system_bluetooth("Wi-Fi handoff complete", NO);
     });
 }
 
@@ -5127,7 +5139,7 @@ static pid_t reusable_baa_broker(void) {
                                           (char*)BTSTACK_PLIST, NULL };
             run_blocking(launchctl, unloadBTstackArgv);
             unlink(BTSTACK_SOCKET);
-            restore_system_bluetooth("CarPlay stopped");
+            restore_system_bluetooth("CarPlay stopped", YES);
         } else {
             ip_log("WARNING: launchctl not found while restoring bluetoothd");
         }

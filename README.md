@@ -2,7 +2,7 @@
 
 > 在越狱 iPhone 上把 CarPlay 的两端都跑起来：本机可以自己进入 CarPlay 界面，也可以充当车机（Head Unit）让别的 iPhone 无线连进来。
 
-当前版本 `0.1.9` — **M1 蓝牙接管阶段**：打包与动态链接层已打通，`CarDisplaySim` 能连上 `BTdaemon` 并收发 HCI 事件；当前卡在 Skywalk 通道上电（`BTSTACK_EVENT_POWERON_FAILED`）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+当前版本 `0.1.14` — **M1（蓝牙接管）已完成**：0.1.10 起真机可跑通全链路，另一台 iPhone 能发现设备 → 蓝牙配对 → iAP2/BAA 认证 → 加入热点 → AirPlay 收流解码 → 画面正常显示。现在是稳定性与体验阶段（启动耗时、触摸回传、退出后资源归还）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 两条产品线
 
@@ -19,7 +19,7 @@
 |---|---|
 | `com.corpsezhao.icarpay_<version>_iphoneos-arm64e.deb` | roothide 越狱机 → Sileo 或 `dpkg -i` |
 
-0.1.9 之前 CI 会顺带打一个 `.ipa`，从 0.1.9 之后不再构建。原因不是打包麻烦，而是权限结构：
+0.1.9 之前 CI 会顺带打一个 `.ipa`，从 0.1.10 起不再构建。原因不是打包麻烦，而是权限结构：
 **HCI socket 只有 root 守护进程拿得到**，App 进程无论签得多自由都不行。ipa 装上去只是一个
 图标、UI、流程都在、但蓝牙那条路走不通的外壳。TrollStore 能把 entitlements 真正授予
 （`ldid` 签名 + `platform-application` + `no-sandbox` 会被保留），所以 MFi/BAA 那道门有可能过——
