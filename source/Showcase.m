@@ -455,15 +455,20 @@ static BOOL start_bluetooth_guard(void) {
          "\"$2\" load \"$4\"; \"$2\" load \"$5\"; "
          "rm -f \"$9\"; "
          "rm -f \"$6\"";
+    /* JB_PATH 现在是运行时函数，不能再直接贴 @ 当字面量 */
+    NSString *shPath = [NSString stringWithUTF8String:JB_PATH("/bin/sh")];
+    NSString *killallPath = [NSString stringWithUTF8String:JB_PATH("/usr/bin/killall")];
+    NSString *pathVar = [NSString stringWithFormat:@"%s:%s:/usr/bin:/bin",
+                         JB_PATH("/usr/bin"), JB_PATH("/bin")];
     NSDictionary *job = @{
         @"Label": @"com.reng.showcase.bluetooth-recovery",
-        @"ProgramArguments": @[@JB_PATH("/bin/sh"), @"-c", script,
+        @"ProgramArguments": @[shPath, @"-c", script,
             @"showcase-bluetooth-recovery", [NSString stringWithFormat:@"%d", getpid()],
             @(ctl), @BTSTACK_PLIST, @BLUETOOL_PLIST, @BLUETOOTHD_PLIST,
-            @BT_GUARD_READY, @JB_PATH("/usr/bin/killall"), @BTSTACK_SOCKET,
+            @BT_GUARD_READY, killallPath, @BTSTACK_SOCKET,
             @BT_OWNED_FLAG],
         @"RunAtLoad": @YES,
-        @"EnvironmentVariables": @{@"PATH": @JB_PATH("/usr/bin") ":" JB_PATH("/bin") ":/usr/bin:/bin"},
+        @"EnvironmentVariables": @{@"PATH": pathVar},
         @"StandardOutPath": @LOG_DIR "/bluetooth-recovery.log",
         @"StandardErrorPath": @LOG_DIR "/bluetooth-recovery.log"
     };
