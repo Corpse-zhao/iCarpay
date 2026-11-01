@@ -445,6 +445,25 @@ static const char *launchctl_path(void) {
     return NULL;
 }
 
+/* 依序试 jbroot 内相对路径，再退到系统绝对路径；返回第一个存在的。
+ * 用于 guard 脚本要用的 sh / killall —— roothide 的 jbroot 里 bin 布局
+ * 与 rootless 不一定相同，不能再假设 <jb>/bin/sh 一定存在。 */
+static const char *first_existing_tool(const char *const *jbRelative,
+                                       const char *const *systemAbsolute) {
+    struct stat st;
+    for (int i = 0; jbRelative[i]; i++) {
+        const char *p = jb_path(jbRelative[i]);
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) return p;
+    }
+    if (jbroot_prefix()[0]) {
+        for (int i = 0; systemAbsolute[i]; i++) {
+            if (stat(systemAbsolute[i], &st) == 0 && S_ISREG(st.st_mode))
+                return systemAbsolute[i];
+        }
+    }
+    return NULL;
+}
+
 /*
  * Hand the controller back to Apple's stack: BlueTool first, because
  * bluetoothd asks it to initialise the chip, then bluetoothd.
@@ -457,7 +476,7 @@ static const char *launchctl_path(void) {
  * 57% and 50%. Loading an already loaded job is harmless.
  */
 static int run_blocking(const char *path, char *const argv[]);
-#define BT_GUARD_DIR "/var/root/Library/ShowcaseBluetooth"
+#define BT_GUARD_DIR "/var/root/Library/iCarpayBluetooth"
 #define BT_GUARD_PLIST BT_GUARD_DIR "/recovery.plist"
 #define BT_GUARD_READY BT_GUARD_DIR "/ready"
 /* Exists while BTstack owns the controller; the Taurine package's BTQuiet
@@ -490,7 +509,11 @@ static BOOL start_bluetooth_guard(void) {
     mkdir(BT_GUARD_DIR, 0700);
     struct stat st;
     if (lstat(BT_GUARD_DIR, &st) || !S_ISDIR(st.st_mode) ||
-        st.st_uid != 0 || (st.st_mode & 077) != 0) return NO;
+        st.st_uid != 0 || (st.st_mode & 077) != 0) {
+        ip_log("[BT] guard dir %s unusable (uid=%u mode=%o)",
+               BT_GUARD_DIR, (unsigned)st.st_uid, (unsigned)(st.st_mode & 07777));
+        return NO;
+    }
     stop_bluetooth_guard();
     NSString *script =
         @"echo ready > \"$6\"; "
@@ -501,33 +524,53 @@ static BOOL start_bluetooth_guard(void) {
          "\"$2\" load \"$4\"; \"$2\" load \"$5\"; "
          "rm -f \"$9\"; "
          "rm -f \"$6\"";
-    /* JB_PATH 现在是运行时函数，不能再直接贴 @ 当字面量 */
-    NSString *shPath = [NSString stringWithUTF8String:JB_PATH("/bin/sh")];
-    NSString *killallPath = [NSString stringWithUTF8String:JB_PATH("/usr/bin/killall")];
+    /* 每个外部命令都先确认存在，roothide 的 jbroot 布局不能想当然 */
+    static const char *shJb[] = { "/bin/sh", "/usr/bin/sh", NULL };
+    static const char *shSys[] = { "/bin/sh", "/usr/bin/sh", NULL };
+    static const char *killallJb[] = { "/usr/bin/killall", "/bin/killall", NULL };
+    static const char *killallSys[] = { "/usr/bin/killall", "/bin/killall",
+                                        "/usr/sbin/killall", NULL };
+    const char *shPath = first_existing_tool(shJb, shSys);
+    const char *killallPath = first_existing_tool(killallJb, killallSys);
+    ip_log("[BT] guard: sh=%s killall=%s", shPath ?: "(missing)",
+           killallPath ?: "(missing)");
+    if (!shPath) {
+        ip_log("[BT] no usable shell for the recovery guard");
+        return NO;
+    }
+    if (!killallPath) killallPath = "/usr/bin/killall";
+    NSString *shObj = [NSString stringWithUTF8String:shPath];
+    NSString *killallObj = [NSString stringWithUTF8String:killallPath];
     NSString *pathVar = [NSString stringWithFormat:@"%s:%s:/usr/bin:/bin",
                          JB_PATH("/usr/bin"), JB_PATH("/bin")];
     NSString *btstackPlistObj = [NSString stringWithUTF8String:BTSTACK_PLIST];
     NSDictionary *job = @{
         @"Label": @"com.reng.showcase.bluetooth-recovery",
-        @"ProgramArguments": @[shPath, @"-c", script,
+        @"ProgramArguments": @[shObj, @"-c", script,
             @"showcase-bluetooth-recovery", [NSString stringWithFormat:@"%d", getpid()],
             @(ctl), btstackPlistObj, @BLUETOOL_PLIST, @BLUETOOTHD_PLIST,
-            @BT_GUARD_READY, killallPath, @BTSTACK_SOCKET,
+            @BT_GUARD_READY, killallObj, @BTSTACK_SOCKET,
             @BT_OWNED_FLAG],
         @"RunAtLoad": @YES,
         @"EnvironmentVariables": @{@"PATH": pathVar},
         @"StandardOutPath": @LOG_DIR "/bluetooth-recovery.log",
         @"StandardErrorPath": @LOG_DIR "/bluetooth-recovery.log"
     };
-    if (![job writeToFile:@BT_GUARD_PLIST atomically:YES]) return NO;
+    if (![job writeToFile:@BT_GUARD_PLIST atomically:YES]) {
+        ip_log("[BT] guard plist write failed: %s", BT_GUARD_PLIST);
+        return NO;
+    }
     char *args[] = { (char *)"launchctl", (char *)"load",
                      (char *)BT_GUARD_PLIST, NULL };
-    if (run_blocking(ctl, args) != 0) return NO;
+    int loadRc = run_blocking(ctl, args);
+    ip_log("[BT] guard launchctl load rc=%d plist=%s", loadRc, BT_GUARD_PLIST);
+    if (loadRc != 0) return NO;
     for (int i = 0; i < 50; i++) {
         if (access(BT_GUARD_READY, F_OK) == 0) return YES;
         usleep(100000);
     }
-    ip_log("[BT] recovery guard did not start; keeping system Bluetooth loaded");
+    ip_log("[BT] recovery guard did not start; keeping system Bluetooth loaded "
+           "(see %s/bluetooth-recovery.log)", g_log_dir);
     return NO;
 }
 
@@ -4556,10 +4599,11 @@ static pid_t reusable_baa_broker(void) {
         return;
     }
     ip_log("launchctl path: %s", launchctl);
+    /* crash recovery 守护失败只降级为警告：它的职责是「app 崩溃后把蓝牙还给
+     * 系统」，缺了它最坏情况是异常退出后要重启才能恢复蓝牙，但不该挡住
+     * 主链路 —— 否则永远测不到真正的 HCI 接管。 */
     if (!start_bluetooth_guard()) {
-        [self failBluetoothWithReason:@"Bluetooth crash recovery could not start."
-                             unsupported:NO];
-        return;
+        ip_log("[BT] WARNING: proceeding without crash recovery guard");
     }
 #ifdef SHOWCASE_TAURINE
     /* 1. Start the bundled BTstack daemon while launchd still spawns jobs.
