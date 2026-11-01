@@ -3565,7 +3565,16 @@ static volatile uint64_t g_hid_oldest_pending_nanos = 0;
 static volatile uint64_t g_hid_slow_send_count = 0;
 
 static void send_hid_report(const uint8_t *report, size_t reportLen) {
-    if (g_event_client_fd < 0 || !g_event_enc.active) return;
+    if (g_event_client_fd < 0 || !g_event_enc.active) {
+        /* 触摸丢失的头号嫌疑：事件通道没起来，报文在这里被静默丢弃。
+         * 限频打印，能一眼看出「点了但没发出去」。 */
+        static int hid_drop_logs = 0;
+        if (hid_drop_logs++ < 8)
+            printf("[TOUCH] DROP report len=%zu (fd=%d active=%d) — event channel not ready\n",
+                   reportLen, g_event_client_fd, g_event_enc.active ? 1 : 0);
+        fflush(stdout);
+        return;
+    }
 
     @autoreleasepool {
         NSDictionary *cmd = @{
@@ -3722,6 +3731,9 @@ static void touch_reader_func(void *arg) {
                 uint8_t phase = payload[0];
                 uint16_t x = payload[1] | (payload[2] << 8);
                 uint16_t y = payload[3] | (payload[4] << 8);
+                if (touchCount == 0)
+                    printf("[TOUCH] first report phase=%u x=%u y=%u len=%u\n",
+                           phase, x, y, len);
                 queue_touch_report(phase, x, y, 0, 0);
                 touchCount++;
             } else if ((len % 14) == 0) {

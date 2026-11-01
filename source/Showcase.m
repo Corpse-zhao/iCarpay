@@ -1746,6 +1746,12 @@ static void send_ipc_payload(uint8_t type, const void *payload,
  * [phase][contact][x LE16][y LE16][timestampNs LE64] */
 static void send_touch_records(NSData *records) {
     if (records.length == 0 || records.length > UINT32_MAX) return;
+    /* 触摸没反应时需要分清「App 没发」还是「services 没收到」。
+     * 只打前几笔，避免滑动时刷爆日志。 */
+    static int touch_log_count = 0;
+    if (touch_log_count++ < 5)
+        ip_log("[TOUCH] send %lu bytes (seq %d)",
+               (unsigned long)records.length, touch_log_count);
     send_ipc_payload(MSG_TOUCH, records.bytes, (uint32_t)records.length);
 }
 
