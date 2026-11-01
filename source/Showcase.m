@@ -448,7 +448,7 @@ static const char *launchctl_path(void) {
 /* 依序试 jbroot 内相对路径，再退到系统绝对路径；返回第一个存在的。
  * 用于 guard 脚本要用的 sh / killall —— roothide 的 jbroot 里 bin 布局
  * 与 rootless 不一定相同，不能再假设 <jb>/bin/sh 一定存在。 */
-static const char *first_existing_tool(const char *const *jbRelative,
+static const char *first_existing_exec(const char *const *jbRelative,
                                        const char *const *systemAbsolute) {
     struct stat st;
     for (int i = 0; jbRelative[i]; i++) {
@@ -530,8 +530,8 @@ static BOOL start_bluetooth_guard(void) {
     static const char *killallJb[] = { "/usr/bin/killall", "/bin/killall", NULL };
     static const char *killallSys[] = { "/usr/bin/killall", "/bin/killall",
                                         "/usr/sbin/killall", NULL };
-    const char *shPath = first_existing_tool(shJb, shSys);
-    const char *killallPath = first_existing_tool(killallJb, killallSys);
+    const char *shPath = first_existing_exec(shJb, shSys);
+    const char *killallPath = first_existing_exec(killallJb, killallSys);
     ip_log("[BT] guard: sh=%s killall=%s", shPath ?: "(missing)",
            killallPath ?: "(missing)");
     if (!shPath) {
