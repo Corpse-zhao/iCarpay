@@ -460,11 +460,12 @@ static BOOL start_bluetooth_guard(void) {
     NSString *killallPath = [NSString stringWithUTF8String:JB_PATH("/usr/bin/killall")];
     NSString *pathVar = [NSString stringWithFormat:@"%s:%s:/usr/bin:/bin",
                          JB_PATH("/usr/bin"), JB_PATH("/bin")];
+    NSString *btstackPlistObj = [NSString stringWithUTF8String:BTSTACK_PLIST];
     NSDictionary *job = @{
         @"Label": @"com.reng.showcase.bluetooth-recovery",
         @"ProgramArguments": @[shPath, @"-c", script,
             @"showcase-bluetooth-recovery", [NSString stringWithFormat:@"%d", getpid()],
-            @(ctl), @BTSTACK_PLIST, @BLUETOOL_PLIST, @BLUETOOTHD_PLIST,
+            @(ctl), btstackPlistObj, @BLUETOOL_PLIST, @BLUETOOTHD_PLIST,
             @BT_GUARD_READY, killallPath, @BTSTACK_SOCKET,
             @BT_OWNED_FLAG],
         @"RunAtLoad": @YES,
