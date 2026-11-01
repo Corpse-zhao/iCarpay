@@ -4597,18 +4597,27 @@ static pid_t reusable_baa_broker(void) {
                                 (char*)BTSTACK_PLIST, NULL };
     rc = run_blocking(launchctl, loadBTstackArgv);
     if (rc != 0) {
-        [self failBluetoothWithReason:
-            @"The BTstack launch daemon failed to load."
-                             unsupported:NO];
-        return;
-    }
-    if (!wait_for_path(BTSTACK_SOCKET, 8, "BTstack socket")) {
-        [self failBluetoothWithReason:
-            @"The BTstack daemon did not create its control socket."
-                             unsupported:NO];
-        return;
+        ip_log("  WARNING: launchctl load BTstack returned %d", rc);
     }
     self.btdaemonPid = 0;
+    if (!wait_for_path(BTSTACK_SOCKET, 8, "BTstack socket")) {
+        /* roothide 对 jbroot 内 LaunchDaemon 的处理与 rootless 不同，
+         * launchd 可能不代为创建 socket。BTdaemon 自己也会 bind 同一个
+         * 路径（btstack_server_run），所以直接以 root 身份拉起它。 */
+        ip_log("[BT] launchd did not expose %s; starting BTdaemon directly",
+               BTSTACK_SOCKET);
+        unlink(BTSTACK_SOCKET);
+        char *directArgv[] = { (char *)"BTdaemon", NULL };
+        self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, directArgv,
+                                        LOG_DIR "/BTdaemon-direct.log");
+        if (self.btdaemonPid <= 0 ||
+            !wait_for_path(BTSTACK_SOCKET, 10, "BTstack socket (direct)")) {
+            [self failBluetoothWithReason:
+                @"The BTstack daemon did not create its control socket."
+                                 unsupported:NO];
+            return;
+        }
+    }
 #endif
 
     /* 3. Spawn carplay_bt with car name + global AP creds */
