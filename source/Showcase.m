@@ -27,6 +27,9 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
@@ -1062,6 +1065,95 @@ static BluetoothRegistryProbeState bluetooth_registry_probe(void) {
  * 于是 BTstack 回落到 h4 之后必然 POWERON_FAILED。
  * 把 IORegistry 里这几类服务的真实属性打出来，才能判断这台机器把 HCI 暴露成什么，
  * 而不是继续猜。只进诊断报告，不参与任何判断。 */
+/* ── 用户态侦察 ──────────────────────────────────────────────────
+ * iPhone 11 / iOS 14 的真机报告已经排除两条传输层：
+ *   - ACIPC 接口存在（hci/sco/acl/debug 四条），但不发布 skywalk nexus UUID
+ *   - netgraph 的 com.apple.uart.bluetooth 节点不存在
+ * 也就是说 iOS 14 的 BTServer 走的是 AppleBluetoothModule /
+ * AppleConvergedIPCOLYBTControl 的 **IOKit 用户客户端**（和 M1 同源，
+ * Asahi Linux 已逆向过内核侧）。要实现这条传输层，得先知道用户态怎么调。
+ * 这里只读扫描设备上的 BTServer 与 dyld 共享缓存，把 ACIPC / 用户客户端
+ * 相关的类名与方法名挖出来 —— ObjC 元数据都在字符串里。 */
+static void recon_extract_context(NSMutableString *out, const char *base,
+                                  size_t len, size_t pos, const char *tag) {
+    size_t lo = pos > 600 ? pos - 600 : 0;
+    size_t hi = pos + 600 < len ? pos + 600 : len;
+    [out appendFormat:@"--- %s @%zu ---\n", tag, pos];
+    size_t i = lo;
+    int printed = 0;
+    while (i < hi && printed < 14) {
+        while (i < hi && (base[i] < 32 || base[i] > 126)) i++;
+        size_t start = i;
+        while (i < hi && base[i] >= 32 && base[i] <= 126) i++;
+        if (i - start >= 5) {
+            [out appendFormat:@"  %.*s\n", (int)(i - start), base + start];
+            printed++;
+        }
+    }
+}
+
+static void recon_scan_file(NSMutableString *out, const char *path,
+                            const char *const *needles, int hitsPerNeedle) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return; }
+    size_t len = (size_t)st.st_size;
+    void *map = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return;
+
+    const char *base = map;
+    [out appendFormat:@"\n%s (%.1f MB)\n", path, len / 1048576.0];
+    for (int n = 0; needles[n]; n++) {
+        size_t nlen = strlen(needles[n]);
+        size_t pos = 0;
+        int hits = 0;
+        while (pos + nlen <= len && hits < hitsPerNeedle) {
+            const void *found = memmem(base + pos, len - pos,
+                                       needles[n], nlen);
+            if (!found) break;
+            size_t at = (size_t)((const char *)found - base);
+            recon_extract_context(out, base, len, at, needles[n]);
+            pos = at + nlen;
+            hits++;
+        }
+    }
+    munmap(map, len);
+}
+
+static NSString *bt_recon_userspace(void) {
+    NSMutableString *out = [NSMutableString string];
+    if (out.length > 8000) return out;
+
+    static const char *const binaries[] = {
+        "/usr/sbin/BTServer", "/usr/libexec/BTServer",
+        "/usr/sbin/BlueTool", "/usr/libexec/BlueTool", NULL,
+    };
+    static const char *const needles[] = {
+        "AppleConvergedIPC", "AppleBluetoothModule", "OLYBT", "ACIPC",
+        "skywalk", "nexus", "uart.bluetooth", NULL,
+    };
+
+    for (int b = 0; binaries[b]; b++)
+        recon_scan_file(out, binaries[b], needles, 3);
+
+    /* MobileBluetooth.framework 在 dyld 共享缓存里；ObjC 类/方法名是明文 */
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = @"/System/Library/Caches/com.apple.dyld";
+    NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:dir error:NULL];
+    for (NSString *name in files) {
+        if (![name hasPrefix:@"dyld_shared_cache"]) continue;
+        if (out.length > 12000) { [out appendString:@"(recon truncated)\n"]; break; }
+        recon_scan_file(out, [[dir stringByAppendingPathComponent:name]
+                                 fileSystemRepresentation],
+                        needles, 3);
+    }
+
+    if (!out.length) return @"(no BTServer / shared cache found)\n";
+    return out;
+}
+
 static NSString *bt_transport_survey(void) {
     /* App 里没有 IOKit 头（iOS SDK 不带 IOKitLib.h），但系统里的 ioreg
      * 能把整棵 registry 连属性一起吐出来，比自己去匹配 IOService 还全。
@@ -1107,6 +1199,9 @@ static NSString *bt_transport_survey(void) {
         }
     }
     if (!kept) [out appendString:@"(no transport-related registry line)\n"];
+
+    /* 用户态侦察：BTServer / dyld 缓存里的 ACIPC 与用户客户端符号 */
+    [out appendString:bt_recon_userspace()];
     return out;
 }
 
