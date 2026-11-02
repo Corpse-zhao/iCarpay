@@ -1331,8 +1331,16 @@ static NSString *bluetooth_diagnostic_report(
             X_OK) == 0 ? "yes" : "no"];
     [report appendFormat:@"btdaemon=%s executable=%s\n", BTDAEMON_PATH,
         access(BTDAEMON_PATH, X_OK) == 0 ? "yes" : "no"];
-    [report appendFormat:@"libbtstack=%s readable=%s\n", BTSTACK_DYLIB_PATH,
-        access(BTSTACK_DYLIB_PATH, R_OK) == 0 ? "yes" : "no"];
+    /* BTdaemon 是静态链接的，从来不加载 /usr/lib 里那个 dylib；真正用
+     * libBTstack.dylib 的只有 App 包内的 carplay_bt（@loader_path）。
+     * 所以这里除了看系统路径，也必须报一下包内副本，否则永远显示 no，
+     * 白白让人以为库缺失。 */
+    [report appendFormat:@"libbtstack=%s readable=%s bundle_copy=%s\n",
+        BTSTACK_DYLIB_PATH,
+        access(BTSTACK_DYLIB_PATH, R_OK) == 0 ? "yes" : "no",
+        access([[[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"libBTstack.dylib"] UTF8String],
+            R_OK) == 0 ? "yes" : "no"];
     [report appendFormat:@"launch_plist=%s readable=%s\n", BTSTACK_PLIST,
         access(BTSTACK_PLIST, R_OK) == 0 ? "yes" : "no"];
     NSString *plistBody = [NSString stringWithContentsOfFile:
@@ -4951,6 +4959,11 @@ static pid_t reusable_baa_broker(void) {
         ip_log("[BT] WARNING: proceeding without crash recovery guard");
     }
     boot_mark("crash guard ready");
+    /* /var/log/BTstack.log 由 launchd 以「追加」方式打开，跨轮次、跨版本都
+     * 不会自己清空。不清它的话，诊断报告里的 failure_class 和 transport
+     * trace 读到的其实是上一版（甚至上一个包）留下的报错 —— 会把「这次
+     * 到底哪里错」彻底掩盖掉。每轮接管前先清零，报告才只反映本轮。 */
+    truncate(SHOWCASE_BTSTACK_LOG_PATH, 0);
 #ifdef SHOWCASE_TAURINE
     /* 1. Start the bundled BTstack daemon while launchd still spawns jobs.
      * On iOS 14 (Taurine) unloading bluetoothd leaves the unload "in
@@ -5376,12 +5389,15 @@ static pid_t reusable_baa_broker(void) {
         : L(@"Showcase's Bluetooth components are incomplete or could not start. "
           "Copy the diagnostic below before reinstalling or reporting the problem.");
 #if !defined(SHOWCASE_TAURINE) && !defined(SHOWCASE_ROOTLESS)
-    /* Taurine on iOS 14 needs its own package's Bluetooth takeover. */
+    /* Taurine on iOS 14 needs its own package's Bluetooth takeover.
+     * 上游原文案让人去找「Showcase for Taurine」那个包；本分支没有单独
+     * 的 Taurine 包名，误装时直接指向文件名以 -taurine.deb 结尾的变体。 */
     if (showcase_on_taurine()) {
-        self.pendingBluetoothErrorTitle = L(@"Install Showcase for Taurine");
+        self.pendingBluetoothErrorTitle = L(@"Wrong iCarpay build for Taurine");
         self.pendingBluetoothErrorExplanation =
-            L(@"This device runs Taurine, which needs a different Bluetooth setup. "
-             "Install Showcase for Taurine from the same repository; it replaces this package.");
+            L(@"This device runs Taurine, which needs its own Bluetooth "
+             "takeover order. Install the iCarpay build whose file name ends "
+             "in -taurine.deb; it replaces this package.");
     }
 #endif
     self.pendingBluetoothDiagnostic = report;

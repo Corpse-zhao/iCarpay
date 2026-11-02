@@ -36,8 +36,8 @@
 "Bluetooth Setup Failed" = "蓝牙设置失败";
 "Showcase could not take over this device's Bluetooth controller. Tell the developer or community that this model is not yet supported and include the diagnostic below." = "Showcase 无法接管此设备的蓝牙控制器。请告知开发者或社区此机型尚不受支持，并附上下方的诊断信息。";
 "Showcase's Bluetooth components are incomplete or could not start. Copy the diagnostic below before reinstalling or reporting the problem." = "Showcase 的蓝牙组件不完整或无法启动。重新安装或报告问题前，请先拷贝下方的诊断信息。";
-"Install Showcase for Taurine" = "请安装 Showcase for Taurine";
-"This device runs Taurine, which needs a different Bluetooth setup. Install Showcase for Taurine from the same repository; it replaces this package." = "此设备使用 Taurine，需要不同的蓝牙设置。请从同一软件源安装 Showcase for Taurine，它会替换此软件包。";
+"Wrong iCarpay build for Taurine" = "装的不是 Taurine 版 iCarpay";
+"This device runs Taurine, which needs its own Bluetooth takeover order. Install the iCarpay build whose file name ends in -taurine.deb; it replaces this package." = "此设备使用 Taurine 越狱，需要专用的蓝牙接管顺序。请安装文件名以 -taurine.deb 结尾的 iCarpay 包（com.corpsezhao.icarpay_x.y.z_iphoneos-arm-taurine.deb），它会替换当前这个包。";
 "Hotspot Details" = "热点信息";
 "Name" = "名称";
 "Password" = "密码";

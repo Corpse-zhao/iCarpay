@@ -2,7 +2,7 @@
 
 > 在越狱 iPhone 上把 CarPlay 的两端都跑起来：本机可以自己进入 CarPlay 界面，也可以充当车机（Head Unit）让别的 iPhone 无线连进来。
 
-当前版本 `0.1.19` — **M1（蓝牙接管）已完成**：0.1.10 起真机可跑通全链路，另一台 iPhone 能发现设备 → 蓝牙配对 → iAP2/BAA 认证 → 加入热点 → AirPlay 收流解码 → 画面正常显示。现在是稳定性与体验阶段（启动耗时、触摸回传、退出后资源归还）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+当前版本 `0.1.20` — **M1（蓝牙接管）已完成**：0.1.10 起真机可跑通全链路，另一台 iPhone 能发现设备 → 蓝牙配对 → iAP2/BAA 认证 → 加入热点 → AirPlay 收流解码 → 画面正常显示。现在是稳定性与体验阶段（启动耗时、触摸回传、退出后资源归还）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 两条产品线
 

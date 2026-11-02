@@ -36,8 +36,8 @@
 "Bluetooth Setup Failed" = "Échec de la configuration Bluetooth";
 "Showcase could not take over this device's Bluetooth controller. Tell the developer or community that this model is not yet supported and include the diagnostic below." = "Showcase n’a pas pu prendre le contrôle du contrôleur Bluetooth de cet appareil. Signalez au développeur ou à la communauté que ce modèle n’est pas encore pris en charge, en joignant le diagnostic ci-dessous.";
 "Showcase's Bluetooth components are incomplete or could not start. Copy the diagnostic below before reinstalling or reporting the problem." = "Les composants Bluetooth de Showcase sont incomplets ou n’ont pas pu démarrer. Copiez le diagnostic ci-dessous avant de réinstaller ou de signaler le problème.";
-"Install Showcase for Taurine" = "Installez Showcase for Taurine";
-"This device runs Taurine, which needs a different Bluetooth setup. Install Showcase for Taurine from the same repository; it replaces this package." = "Cet appareil utilise Taurine, qui demande une configuration Bluetooth différente. Installez Showcase for Taurine depuis le même dépôt ; il remplace ce paquet.";
+"Wrong iCarpay build for Taurine" = "Mauvaise version d’iCarpay pour Taurine";
+"This device runs Taurine, which needs its own Bluetooth takeover order. Install the iCarpay build whose file name ends in -taurine.deb; it replaces this package." = "Cet appareil utilise Taurine, qui exige son propre ordre de prise de contrôle Bluetooth. Installez la version d’iCarpay dont le nom se termine par -taurine.deb ; elle remplace ce paquet.";
 "Hotspot Details" = "Infos du point d’accès";
 "Name" = "Nom";
 "Password" = "Mot de passe";

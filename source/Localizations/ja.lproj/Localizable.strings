@@ -36,8 +36,8 @@
 "Bluetooth Setup Failed" = "Bluetoothの設定に失敗しました";
 "Showcase could not take over this device's Bluetooth controller. Tell the developer or community that this model is not yet supported and include the diagnostic below." = "ShowcaseはこのデバイスのBluetoothコントローラを制御できませんでした。このモデルがまだサポートされていないことを開発者またはコミュニティに伝え、以下の診断情報を添えてください。";
 "Showcase's Bluetooth components are incomplete or could not start. Copy the diagnostic below before reinstalling or reporting the problem." = "ShowcaseのBluetoothコンポーネントが不完全か、起動できませんでした。再インストールや問題の報告の前に、以下の診断情報をコピーしてください。";
-"Install Showcase for Taurine" = "Showcase for Taurineをインストールしてください";
-"This device runs Taurine, which needs a different Bluetooth setup. Install Showcase for Taurine from the same repository; it replaces this package." = "このデバイスはTaurineを使用しており、別のBluetooth設定が必要です。同じリポジトリからShowcase for Taurineをインストールしてください。このパッケージと置き換わります。";
+"Wrong iCarpay build for Taurine" = "Taurine用iCarpayビルドが必要です";
+"This device runs Taurine, which needs its own Bluetooth takeover order. Install the iCarpay build whose file name ends in -taurine.deb; it replaces this package." = "このデバイスはTaurineを使用しており、専用のBluetooth乗っ取り順序が必要です。ファイル名が -taurine.deb で終わるiCarpayパッケージをインストールしてください。このパッケージと置き換わります。";
 "Hotspot Details" = "ホットスポット情報";
 "Name" = "名前";
 "Password" = "パスワード";
