@@ -32,6 +32,10 @@ EXECUTABLES = {
     "Showcase",
     "CarDisplaySim",
     "CarPlay Simulator",
+    # rootful/taurine 变体的无空格别名（carplay_bt / carplay_services）：
+    # 上游 rootful 代码用这两个名字找辅助进程，必须 0755，否则 access(X_OK) 失败
+    "carplay_bt",
+    "carplay_services",
     "BTdaemon",
     "libBTstack.dylib",
 }

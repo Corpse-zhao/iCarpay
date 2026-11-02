@@ -207,6 +207,14 @@ jobs:
           cp build/CarDisplaySim       "$APP/CarDisplaySim"
           cp build/carplay_services    "$APP/CarPlay Simulator"
           cp build/libBTstack.dylib    "$APP/libBTstack.dylib"
+          # rootful/taurine 变体：上游用不带空格的辅助进程名（carplay_bt /
+          # carplay_services）。缺这两个名字，bgPrepareBT 直接报
+          # "The bundled Bluetooth helper is missing or is not executable."
+          # 双名并存，两种代码路径都能找到自己要的。
+          if [ "${{ matrix.variant }}" != "roothide" ]; then
+            cp build/CarDisplaySim     "$APP/carplay_bt"
+            cp build/carplay_services  "$APP/carplay_services"
+          fi
           cp source/Info.plist         "$APP/Info.plist"
 
           # Info.plist 的版本必须跟 control 的 Version 一致。
@@ -244,6 +252,10 @@ jobs:
           ldid -Ssource/ent_bt.xml        "$APP/CarDisplaySim"
           ldid -Ssource/ent_svc.xml       "$APP/CarPlay Simulator"
           ldid -Ssource/ent_btdaemon.xml  build/payload/usr/bin/BTdaemon
+          if [ "${{ matrix.variant }}" != "roothide" ]; then
+            ldid -Ssource/ent_bt.xml      "$APP/carplay_bt"
+            ldid -Ssource/ent_svc.xml     "$APP/carplay_services"
+          fi
           echo "--- entitlements 自检（必须能看到 deviceidentity / attestation / keystore）"
           ldid -e "$APP/CarPlay Simulator" | grep -E 'deviceidentity|attestation|keystore|no-sandbox' || {
             echo "❌ ent_svc 未生效"; exit 1; }
@@ -305,6 +317,13 @@ jobs:
                       "Library/LaunchDaemons/ch.ringwald.BTstack.plist"]
               for m in must:
                   assert m in entries, "缺文件: " + m
+              # rootful/taurine：上游用无空格辅助进程名，缺了或没执行位就是
+              # 真机上的 "Bluetooth helper is missing or is not executable"
+              if not arch.endswith("arm64e"):
+                  for m in ("Applications/iCarpay.app/carplay_bt",
+                            "Applications/iCarpay.app/carplay_services"):
+                      assert m in entries and entries[m].mode == 0o755, \
+                          "rootful 变体需要 0755 的无空格辅助进程: " + m
               # 占位符只属于 roothide：rootful 的 plist 必须是真实绝对路径
               plist = tf.extractfile(entries["Library/LaunchDaemons/ch.ringwald.BTstack.plist"]).read().decode()
               prog = plist.split("ProgramArguments")[1].split("</array>")[0]
