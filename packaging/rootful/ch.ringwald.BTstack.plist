@@ -4,7 +4,7 @@
 <dict>
 	<key>Label</key>
 	<string>ch.ringwald.BTstack</string>
-	<!-- rootful 布局：真实绝对路径，不需要 __JBROOT__ 占位符 -->
+	<!-- rootful 布局：真实绝对路径，安装时不需要任何占位符替换 -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/BTdaemon</string>

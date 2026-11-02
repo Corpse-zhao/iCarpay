@@ -294,11 +294,12 @@ jobs:
                   assert m in entries, "缺文件: " + m
               # 占位符只属于 roothide：rootful 的 plist 必须是真实绝对路径
               plist = tf.extractfile(entries["Library/LaunchDaemons/ch.ringwald.BTstack.plist"]).read().decode()
+              prog = plist.split("ProgramArguments")[1].split("</array>")[0]
               if arch.endswith("arm64e"):
-                  assert "__JBROOT__" in plist, "roothide 版 plist 必须保留 __JBROOT__"
+                  assert "__JBROOT__" in prog, "roothide 版 ProgramArguments 必须保留 __JBROOT__"
               else:
-                  assert "__JBROOT__" not in plist, "rootful 版 plist 不能有占位符"
-                  assert "<string>/usr/bin/BTdaemon</string>" in plist, "rootful plist 必须写 /usr/bin/BTdaemon"
+                  assert "__JBROOT__" not in prog, "rootful 版 ProgramArguments 不能有占位符"
+                  assert "<string>/usr/bin/BTdaemon</string>" in prog, "rootful plist 必须写 /usr/bin/BTdaemon"
               print("payload 共 %d 项" % len(names))
           print("✅ 包结构校验通过")
           PY
