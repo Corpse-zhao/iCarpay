@@ -1254,7 +1254,7 @@ static NSString *bt_recon_userspace(void) {
     chown(savePath.fileSystemRepresentation, 501, 501);
     [out appendFormat:@"\nrecon_saved=%@ (%lu bytes)\n", savePath,
         (unsigned long)[[fm attributesOfItemAtPath:savePath error:NULL]
-            fileSize]);
+            fileSize]];
     return out;
 }
 
