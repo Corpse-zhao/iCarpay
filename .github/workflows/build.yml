@@ -171,7 +171,8 @@ jobs:
             -o build/Showcase source/Showcase.m \
             -Wl,-undefined,dynamic_lookup \
             -framework UIKit -framework AVFoundation -framework AudioToolbox \
-            -framework CoreMedia -framework Foundation -framework Security
+            -framework CoreMedia -framework Foundation -framework Security \
+            -framework IOKit
 
           # 蓝牙辅助（唯一链接 libBTstack 的）
           # -undefined,error：缺符号必须在构建期炸，不许等到设备上 dyld 崩

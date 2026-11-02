@@ -24,6 +24,7 @@
 #include "hci_transport_skywalk_iphone.h"
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,6 +42,7 @@
 typedef mach_port_t io_object_t;
 typedef io_object_t io_registry_entry_t;
 typedef io_object_t io_service_t;
+typedef io_object_t io_iterator_t;
 typedef uint32_t IOOptionBits;
 
 #define SHOWCASE_IO_OBJECT_NULL ((io_object_t)0)
@@ -50,6 +52,10 @@ typedef uint32_t IOOptionBits;
 extern CFMutableDictionaryRef IOServiceMatching(const char *name);
 extern io_service_t IOServiceGetMatchingService(
     mach_port_t main_port, CFDictionaryRef matching);
+extern kern_return_t IOServiceGetMatchingServices(
+    mach_port_t main_port, CFDictionaryRef matching,
+    io_iterator_t *existing);
+extern io_object_t IOIteratorNext(io_iterator_t iterator);
 extern CFTypeRef IORegistryEntrySearchCFProperty(
     io_registry_entry_t entry, const char *plane, CFStringRef key,
     CFAllocatorRef allocator, IOOptionBits options);
@@ -141,6 +147,9 @@ typedef struct {
     skywalk_packet_t *queue_head;
     skywalk_packet_t *queue_tail;
     unsigned int queue_count;
+    int acl_shared;
+    int rx_shape_logged;
+    uint8_t tx_frame[2048];
     int api_ready;
     int open;
 } skywalk_transport_t;
@@ -199,7 +208,7 @@ static int load_api(void) {
     return skywalk.api_ready;
 }
 
-static int copy_string_property(io_service_t service, CFStringRef key,
+static int copy_property_string(io_service_t service, CFStringRef key,
                                 char *output, size_t output_size) {
     CFTypeRef value = IORegistryEntrySearchCFProperty(
         service, SHOWCASE_IO_SERVICE_PLANE, key, kCFAllocatorDefault,
@@ -213,42 +222,152 @@ static int copy_string_property(io_service_t service, CFStringRef key,
     return ok;
 }
 
-static int discover_pipe(skywalk_pipe_t *pipe) {
-    char transport[32] = {0};
-    char uuid_string[64] = {0};
-    CFMutableDictionaryRef matching =
-        IOServiceMatching("AppleConvergedIPCInterface");
-    if (!matching) return 0;
-
-    CFStringRef protocol = CFStringCreateWithCString(
-        kCFAllocatorDefault, pipe->protocol, kCFStringEncodingUTF8);
-    if (!protocol) {
-        CFRelease(matching);
-        return 0;
+static int string_equals_ci(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return 0;
+        a++;
+        b++;
     }
-    CFDictionarySetValue(matching, CFSTR("ACIPCInterfaceProtocol"),
-                         protocol);
-    CFRelease(protocol);
+    return *a == '\0' && *b == '\0';
+}
 
-    io_service_t service = IOServiceGetMatchingService(MACH_PORT_NULL,
-                                                        matching);
-    if (service == SHOWCASE_IO_OBJECT_NULL) return 0;
+/* iOS 版本之间 nexus UUID 属性的名字变动过，逐个试；哪个能解析就用哪个。 */
+static const char *const k_nexus_uuid_keys[] = {
+    "IOSkywalkNexusUUID", "ACIPCInterfaceNexusUUID", "IOSkywalkUUID",
+    "ACIPCInterfaceUUID", "NexusUUID",
+};
 
-    int transport_ok = copy_string_property(
+static int pipe_take_uuid(skywalk_pipe_t *pipe, io_service_t service) {
+    char uuid_string[80] = {0};
+    for (size_t i = 0;
+         i < sizeof(k_nexus_uuid_keys) / sizeof(k_nexus_uuid_keys[0]); i++) {
+        CFStringRef key = CFStringCreateWithCString(
+            kCFAllocatorDefault, k_nexus_uuid_keys[i], kCFStringEncodingUTF8);
+        if (!key) continue;
+        int ok = copy_property_string(service, key, uuid_string,
+                                      sizeof(uuid_string));
+        CFRelease(key);
+        if (ok && uuid_parse(uuid_string, pipe->uuid) == 0) {
+            snprintf(pipe->uuid_string, sizeof(pipe->uuid_string), "%s",
+                     uuid_string);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int pipe_from_service(skywalk_pipe_t *pipe, io_service_t service) {
+    char transport[48] = {0};
+    memset(pipe->uuid, 0, sizeof(pipe->uuid));
+    pipe->uuid_string[0] = '\0';
+
+    int transport_ok = copy_property_string(
         service, CFSTR("ACIPCInterfaceTransport"), transport,
         sizeof(transport));
-    int uuid_ok = copy_string_property(
-        service, CFSTR("IOSkywalkNexusUUID"), uuid_string,
-        sizeof(uuid_string));
-    IOObjectRelease(service);
-
-    if (!transport_ok || strcmp(transport, "skywalk") != 0 || !uuid_ok ||
-        uuid_parse(uuid_string, pipe->uuid) != 0) {
+    /* ACIPCInterfaceTransport 在 iOS 13/14 上可能根本不存在（或写成别的
+     * 拼法）。只有「明确写了、且不是 skywalk」才算否决。 */
+    if (transport_ok && !string_equals_ci(transport, "skywalk")) {
+        printf("[SW] %s interface rejected: transport=%s\n", pipe->protocol,
+               transport);
+        fflush(stdout);
         return 0;
     }
-    snprintf(pipe->uuid_string, sizeof(pipe->uuid_string), "%s",
-             uuid_string);
+    if (!pipe_take_uuid(pipe, service)) {
+        printf("[SW] %s interface rejected: no usable nexus uuid\n",
+               pipe->protocol);
+        fflush(stdout);
+        return 0;
+    }
     return 1;
+}
+
+static int protocol_matches_pipe(skywalk_pipe_t *pipe, io_service_t service) {
+    static const char *const protocol_keys[] = {
+        "ACIPCInterfaceProtocol",
+        "ACIPCInterfaceName",
+    };
+    for (size_t i = 0;
+         i < sizeof(protocol_keys) / sizeof(protocol_keys[0]); i++) {
+        char value[48] = {0};
+        CFStringRef key = CFStringCreateWithCString(
+            kCFAllocatorDefault, protocol_keys[i], kCFStringEncodingUTF8);
+        if (!key) continue;
+        int ok = copy_property_string(service, key, value, sizeof(value));
+        CFRelease(key);
+        if (ok && string_equals_ci(value, pipe->protocol)) return 1;
+    }
+    return 0;
+}
+
+static int discover_pipe(skywalk_pipe_t *pipe) {
+    /* 快路径：直接靠 ACIPCInterfaceProtocol 属性匹配（iOS 15/16 走这条）。 */
+    CFMutableDictionaryRef matching =
+        IOServiceMatching("AppleConvergedIPCInterface");
+    if (matching) {
+        CFStringRef protocol = CFStringCreateWithCString(
+            kCFAllocatorDefault, pipe->protocol, kCFStringEncodingUTF8);
+        if (protocol) {
+            CFDictionarySetValue(matching, CFSTR("ACIPCInterfaceProtocol"),
+                                 protocol);
+            CFRelease(protocol);
+            io_service_t service = IOServiceGetMatchingService(
+                MACH_PORT_NULL, matching);
+            if (service != SHOWCASE_IO_OBJECT_NULL) {
+                int ok = pipe_from_service(pipe, service);
+                IOObjectRelease(service);
+                if (ok) return 1;
+            }
+        }
+    }
+
+    /* 慢路径：属性匹配空手而归时，把所有 interface 的协议名读出来自己比。
+     * iOS 14 上属性位置/命名都和 15 不一样，硬匹配匹配不到。 */
+    CFMutableDictionaryRef all_matching =
+        IOServiceMatching("AppleConvergedIPCInterface");
+    if (!all_matching) {
+        printf("[SW] no AppleConvergedIPCInterface class at all\n");
+        fflush(stdout);
+        return 0;
+    }
+    io_iterator_t iterator = 0;
+    if (IOServiceGetMatchingServices(MACH_PORT_NULL, all_matching,
+                                     &iterator) != KERN_SUCCESS ||
+        !iterator) {
+        printf("[SW] cannot enumerate AppleConvergedIPCInterface\n");
+        fflush(stdout);
+        return 0;
+    }
+
+    int found = 0;
+    int index = 0;
+    io_service_t service = 0;
+    while ((service = IOIteratorNext(iterator)) != SHOWCASE_IO_OBJECT_NULL) {
+        index++;
+        char name[48] = {0};
+        char transport[48] = {0};
+        copy_property_string(service, CFSTR("ACIPCInterfaceProtocol"), name,
+                             sizeof(name));
+        copy_property_string(service, CFSTR("ACIPCInterfaceTransport"),
+                             transport, sizeof(transport));
+        printf("[SW] interface#%d protocol='%s' transport='%s'\n", index,
+               name[0] ? name : "(none)",
+               transport[0] ? transport : "(none)");
+        fflush(stdout);
+        if (!found && protocol_matches_pipe(pipe, service)) {
+            found = pipe_from_service(pipe, service);
+        }
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(iterator);
+
+    if (!found) {
+        printf("[SW] no AppleConvergedIPCInterface for protocol '%s' "
+               "(enumerated %d interfaces)\n", pipe->protocol, index);
+        fflush(stdout);
+    }
+    return found;
 }
 
 static void initialize_pipe(skywalk_pipe_t *pipe, const char *protocol,
@@ -264,7 +383,12 @@ int hci_transport_skywalk_iphone_present(void) {
     skywalk_pipe_t acl;
     initialize_pipe(&hci, "hci", HCI_EVENT_PACKET);
     initialize_pipe(&acl, "acl", HCI_ACL_DATA_PACKET);
-    return discover_pipe(&hci) && discover_pipe(&acl);
+    if (!discover_pipe(&hci)) return 0;
+    /* 有些 iOS 版本没有独立的 "acl" nexus，ACL 数据混在 HCI 通道里走。
+     * 只要 "hci" 在，就说明这颗机器的蓝牙确实挂在 ConvergedIPC 上，
+     * 不该再回落到早就不存在的 netgraph UART。 */
+    (void)discover_pipe(&acl);
+    return 1;
 }
 
 int hci_transport_skywalk_iphone_available(void) {
@@ -353,6 +477,39 @@ static int queue_packet(uint8_t packet_type, const uint8_t *packet,
     return 1;
 }
 
+/* HCI 通道同时承载 ACL 时的 H4 解复用：首字节是包类型。 */
+static int demux_shared_slot(const uint8_t *source, uint16_t slot_size,
+                             uint8_t *output, uint16_t *size_out,
+                             uint8_t *type_out) {
+    if (!source || slot_size < 3) return 0;
+
+    const uint8_t *body = source + 1;
+    uint16_t body_size = (uint16_t)(slot_size - 1);
+    uint16_t expected = 0;
+    uint8_t type = 0;
+
+    switch (source[0]) {
+        case 0x04:
+            if (body_size < 2) return 0;
+            expected = (uint16_t)(body[1] + 2u);
+            type = HCI_EVENT_PACKET;
+            break;
+        case 0x02:
+            if (body_size < 4) return 0;
+            expected = (uint16_t)(little_endian_read_16(body, 2) + 4u);
+            type = HCI_ACL_DATA_PACKET;
+            break;
+        default:
+            return 0;
+    }
+    if (expected != body_size) return 0;
+
+    memcpy(output, body, body_size);
+    *size_out = body_size;
+    *type_out = type;
+    return 1;
+}
+
 static void process_pipe_on_reader(skywalk_pipe_t *pipe) {
     skywalk_api_t *api = &skywalk.api;
     unsigned int processed = 0;
@@ -367,13 +524,30 @@ static void process_pipe_on_reader(skywalk_pipe_t *pipe) {
 
         uint16_t slot_size = properties.sp_len;
         uint16_t size = slot_size;
+        uint8_t packet_type = pipe->packet_type;
         const uint8_t *source =
             (const uint8_t *)(uintptr_t)properties.sp_buf_ptr;
-        int valid = source && size <= sizeof(rx_buffer) &&
-            normalize_packet(pipe, &source, &size);
-        if (valid) {
-            memcpy(rx_buffer, source, size);
-        } else {
+        int valid = 0;
+
+        if (source && slot_size <= sizeof(rx_buffer)) {
+            if (skywalk.acl_shared && pipe == &skywalk.hci) {
+                if (!skywalk.rx_shape_logged) {
+                    skywalk.rx_shape_logged = 1;
+                    log_info("skywalk: shared RX slot len=%u first=0x%02x",
+                             slot_size, slot_size ? source[0] : 0);
+                }
+                valid = demux_shared_slot(source, slot_size, rx_buffer,
+                                          &size, &packet_type);
+            }
+            if (!valid) {
+                /* 非共享通道，或共享通道上来的本来就是裸包 */
+                size = slot_size;
+                valid = normalize_packet(pipe, &source, &size);
+                if (valid) memcpy(rx_buffer, source, size);
+            }
+        }
+
+        if (!valid) {
             log_error("skywalk: invalid %s RX slot len=%u capacity=%u",
                       pipe->protocol, slot_size,
                       (unsigned int)sizeof(rx_buffer));
@@ -392,41 +566,56 @@ static void process_pipe_on_reader(skywalk_pipe_t *pipe) {
             break;
         }
 
-        if (valid && !queue_packet(pipe->packet_type, rx_buffer, size))
-            break;
+        if (valid && !queue_packet(packet_type, rx_buffer, size)) break;
         processed++;
     }
 }
 
 static void *skywalk_reader_main(void *context) {
     (void)context;
-    log_info("skywalk: poll reader started hci_fd=%d acl_fd=%d",
-             skywalk.hci.fd, skywalk.acl.fd);
+    log_info("skywalk: poll reader started hci_fd=%d acl_fd=%d shared=%d",
+             skywalk.hci.fd, skywalk.acl_shared ? -1 : skywalk.acl.fd,
+             skywalk.acl_shared);
     for (;;) {
         struct pollfd descriptors[3];
-        descriptors[0].fd = skywalk.hci.fd;
-        descriptors[0].events = POLLIN;
-        descriptors[0].revents = 0;
-        descriptors[1].fd = skywalk.acl.fd;
-        descriptors[1].events = POLLIN;
-        descriptors[1].revents = 0;
-        descriptors[2].fd = skywalk.stop_pipe[0];
-        descriptors[2].events = POLLIN;
-        descriptors[2].revents = 0;
+        int count = 0;
+
+        int hci_index = count;
+        descriptors[count].fd = skywalk.hci.fd;
+        descriptors[count].events = POLLIN;
+        descriptors[count].revents = 0;
+        count++;
+
+        int acl_index = -1;
+        if (!skywalk.acl_shared) {
+            acl_index = count;
+            descriptors[count].fd = skywalk.acl.fd;
+            descriptors[count].events = POLLIN;
+            descriptors[count].revents = 0;
+            count++;
+        }
+
+        int stop_index = count;
+        descriptors[count].fd = skywalk.stop_pipe[0];
+        descriptors[count].events = POLLIN;
+        descriptors[count].revents = 0;
+        count++;
 
         int poll_rc;
         do {
-            poll_rc = poll(descriptors, 3, -1);
+            poll_rc = poll(descriptors, (nfds_t)count, -1);
         } while (poll_rc < 0 && errno == EINTR);
         if (poll_rc < 0) {
             log_error("skywalk: RX poll failed errno=%d (%s)", errno,
                       strerror(errno));
             break;
         }
-        if (descriptors[2].revents & (POLLIN | POLLHUP | POLLERR)) break;
-        if (descriptors[0].revents & (POLLIN | POLLHUP | POLLERR))
+        if (descriptors[stop_index].revents & (POLLIN | POLLHUP | POLLERR))
+            break;
+        if (descriptors[hci_index].revents & (POLLIN | POLLHUP | POLLERR))
             process_pipe_on_reader(&skywalk.hci);
-        if (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR))
+        if (acl_index >= 0 &&
+            (descriptors[acl_index].revents & (POLLIN | POLLHUP | POLLERR)))
             process_pipe_on_reader(&skywalk.acl);
     }
     log_info("skywalk: poll reader stopped");
@@ -513,10 +702,19 @@ static int transport_open(void) {
 
     initialize_pipe(&skywalk.hci, "hci", HCI_EVENT_PACKET);
     initialize_pipe(&skywalk.acl, "acl", HCI_ACL_DATA_PACKET);
+    skywalk.rx_shape_logged = 0;
     if (open_pipe(&skywalk.hci) != 0) return -1;
-    if (open_pipe(&skywalk.acl) != 0) {
-        close_pipe(&skywalk.hci);
-        return -1;
+    if (discover_pipe(&skywalk.acl)) {
+        if (open_pipe(&skywalk.acl) != 0) {
+            close_pipe(&skywalk.hci);
+            return -1;
+        }
+        skywalk.acl_shared = 0;
+    } else {
+        /* iOS 14 一类版本只暴露 hci nexus，ACL 与事件共用同一条通道。 */
+        log_info("skywalk: no dedicated ACL nexus, multiplexing ACL over "
+                 "the HCI channel with H4 framing");
+        skywalk.acl_shared = 1;
     }
 
     skywalk.wake_pipe[0] = -1;
@@ -647,10 +845,27 @@ static int transport_send_packet(uint8_t packet_type, uint8_t *packet,
     if (!skywalk.open || !packet || size <= 0) return -1;
 
     skywalk_pipe_t *pipe;
+    const uint8_t *payload = packet;
+    int payload_size = size;
+
     if (packet_type == HCI_COMMAND_DATA_PACKET) {
         pipe = &skywalk.hci;
     } else if (packet_type == HCI_ACL_DATA_PACKET) {
-        pipe = &skywalk.acl;
+        if (skywalk.acl_shared) {
+            /* 共用通道时必须带上 H4 类型字节，否则对端分不出是事件还是数据 */
+            if ((size_t)size + 1u > sizeof(skywalk.tx_frame)) {
+                log_error("skywalk: ACL packet len=%d exceeds frame buffer",
+                          size);
+                return -1;
+            }
+            pipe = &skywalk.hci;
+            skywalk.tx_frame[0] = 0x02;
+            memcpy(skywalk.tx_frame + 1, packet, (size_t)size);
+            payload = skywalk.tx_frame;
+            payload_size = size + 1;
+        } else {
+            pipe = &skywalk.acl;
+        }
     } else {
         log_error("skywalk: unsupported outbound packet type=0x%02x",
                   packet_type);
@@ -660,14 +875,15 @@ static int transport_send_packet(uint8_t packet_type, uint8_t *packet,
     slot_prop_t properties;
     channel_slot_t slot = NULL;
     if (wait_for_tx_slot(pipe, &properties, &slot) != 0) return -1;
-    if (!properties.sp_buf_ptr || size > properties.sp_len) {
+    if (!properties.sp_buf_ptr || payload_size > properties.sp_len) {
         log_error("skywalk: %s TX packet len=%d exceeds slot=%u",
-                  pipe->protocol, size, properties.sp_len);
+                  pipe->protocol, payload_size, properties.sp_len);
         return -1;
     }
 
-    memcpy((void *)(uintptr_t)properties.sp_buf_ptr, packet, (size_t)size);
-    properties.sp_len = (uint16_t)size;
+    memcpy((void *)(uintptr_t)properties.sp_buf_ptr, payload,
+           (size_t)payload_size);
+    properties.sp_len = (uint16_t)payload_size;
     skywalk.api.set_slot_properties(pipe->tx_ring, slot, &properties);
 
     int advance_rc = skywalk.api.advance_slot(pipe->tx_ring, slot);

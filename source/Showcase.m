@@ -18,6 +18,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #import <Security/Security.h>
+#import <IOKit/IOKitLib.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -1055,6 +1056,95 @@ static BluetoothRegistryProbeState bluetooth_registry_probe(void) {
     }
 }
 
+/* 蓝牙传输层现场勘察。
+ *
+ * iOS 14 的 iPhone 11 上：Skywalk 探测没命中（AppleConvergedIPCInterface 的
+ * 属性可能换了名字），netgraph 的 com.apple.uart.bluetooth 又返回 ENOENT，
+ * 于是 BTstack 回落到 h4 之后必然 POWERON_FAILED。
+ * 把 IORegistry 里这几类服务的真实属性打出来，才能判断这台机器把 HCI 暴露成什么，
+ * 而不是继续猜。只进诊断报告，不参与任何判断。 */
+static NSString *survey_property_text(id value) {
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *text = value;
+        if (text.length > 96)
+            text = [[text substringToIndex:96] stringByAppendingString:@"..."];
+        return text;
+    }
+    if ([value isKindOfClass:[NSData class]]) {
+        NSData *data = (NSData *)value;
+        NSUInteger length = data.length;
+        /* nexus UUID 有可能以裸 16 字节存在，那就按 UUID 格式打出来 */
+        if (length == 16) {
+            const unsigned char *bytes = data.bytes;
+            return [NSString stringWithFormat:
+                @"<data 16B %02x%02x%02x%02x%02x%02x%02x%02x"
+                 "%02x%02x%02x%02x%02x%02x%02x%02x>",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15]];
+        }
+        return [NSString stringWithFormat:@"<data %luB>",
+                (unsigned long)length];
+    }
+    if ([value isKindOfClass:[NSNumber class]]) return [value stringValue];
+    if ([value isKindOfClass:[NSArray class]])
+        return [NSString stringWithFormat:@"<array %lu>",
+                (unsigned long)[(NSArray *)value count]];
+    return @"<object>";
+}
+
+static NSString *bt_transport_survey(void) {
+    static const char *classes[] = {
+        "AppleConvergedIPCInterface", "AppleConvergedIPCRTIInterface",
+        "AppleConvergedIPCControl", "AppleBluetoothModule",
+        "AppleSimpleUARTSync", "IOSkywalkNexus",
+        "IOBluetoothHCIController", "AppleBluetoothHCI",
+    };
+    NSMutableString *out = [NSMutableString string];
+    for (size_t c = 0; c < sizeof(classes) / sizeof(classes[0]); c++) {
+        if (out.length > 5000) {
+            [out appendString:@"(truncated)\n"];
+            break;
+        }
+        CFMutableDictionaryRef matching = IOServiceMatching(classes[c]);
+        if (!matching) continue;
+        io_iterator_t iterator = 0;
+        if (IOServiceGetMatchingServices(MACH_PORT_NULL, matching, &iterator) !=
+                KERN_SUCCESS ||
+            !iterator)
+            continue;
+        io_object_t service = 0;
+        int index = 0;
+        while ((service = IOIteratorNext(iterator)) != 0 && index < 6) {
+            index++;
+            [out appendFormat:@"%@#%d", @(classes[c]), index];
+            CFMutableDictionaryRef properties = NULL;
+            if (IORegistryEntryCreateCFProperties(
+                    service, &properties, kCFAllocatorDefault, 0) ==
+                    KERN_SUCCESS &&
+                properties) {
+                NSDictionary *dictionary = CFBridgingRelease(properties);
+                NSArray *keys = [[dictionary allKeys]
+                    sortedArrayUsingComparator:^NSComparisonResult(id a,
+                                                                   id b) {
+                        return [[a description] compare:[b description]];
+                    }];
+                for (id key in keys) {
+                    [out appendFormat:@" %@=%@", [key description],
+                                     survey_property_text(dictionary[key])];
+                }
+            } else {
+                [out appendString:@" (no properties)"];
+            }
+            [out appendString:@"\n"];
+            IOObjectRelease(service);
+        }
+        IOObjectRelease(iterator);
+    }
+    if (!out.length) [out appendString:@"(no matching IOService)\n"];
+    return out;
+}
+
 static NSString *hardware_machine_identifier(void) {
     char machine[128] = {0};
     size_t length = sizeof(machine);
@@ -1093,6 +1183,49 @@ static NSString *bounded_log_tail(NSString *path, NSUInteger maxBytes,
         NSArray<NSString *> *tail =
             [lines subarrayWithRange:NSMakeRange(first, lines.count - first)];
         return [tail componentsJoinedByString:@"\n"];
+    } @catch (__unused NSException *exception) {
+        return @"";
+    }
+}
+
+/* 传输层选型和 skywalk 探测日志都打在守护进程日志的 **开头**，
+ * 而报告里的 tail 只截末尾，正好把关键证据截掉。这里从头读，
+ * 只挑传输层相关的行。 */
+static NSString *bt_daemon_transport_trace(NSString *path) {
+    if (!path.length) return @"";
+    @try {
+        NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:path];
+        if (!handle) return @"";
+        NSData *data = [handle readDataOfLength:512 * 1024];
+        [handle closeFile];
+        if (!data.length) return @"";
+
+        NSString *text = [[NSString alloc] initWithData:data
+                                               encoding:NSUTF8StringEncoding];
+        if (!text) {
+            text = [[NSString alloc] initWithData:data
+                                         encoding:NSISOLatin1StringEncoding];
+        }
+        if (!text.length) return @"";
+
+        NSArray<NSString *> *lines =
+            [text componentsSeparatedByCharactersInSet:
+                [NSCharacterSet newlineCharacterSet]];
+        NSArray<NSString *> *markers = @[
+            @"[SW]", @"BTstack transport", @"h4_open", @"HCI_INIT",
+            @"POWERON", @"skywalk:", @"nexus",
+        ];
+        NSMutableArray<NSString *> *kept = [NSMutableArray array];
+        for (NSString *line in lines) {
+            if (kept.count >= 60) break;
+            for (NSString *marker in markers) {
+                if ([line rangeOfString:marker].location != NSNotFound) {
+                    [kept addObject:line];
+                    break;
+                }
+            }
+        }
+        return [kept componentsJoinedByString:@"\n"];
     } @catch (__unused NSException *exception) {
         return @"";
     }
@@ -1166,6 +1299,8 @@ static NSString *bluetooth_diagnostic_report(
         ? bounded_log_tail(@LOG_DIR "/carplay_bt-retry.log", 8192, 18)
         : @"";
     NSString *daemon = bounded_log_tail(@SHOWCASE_BTSTACK_LOG_PATH, 8192, 18);
+    NSString *daemonTransport =
+        bt_daemon_transport_trace(@SHOWCASE_BTSTACK_LOG_PATH);
     NSString *daemonDirect = bounded_log_tail(
         [NSString stringWithUTF8String:log_path("BTdaemon-direct.log")], 8192, 14);
     /* 「退出后蓝牙打不开 / 只有重启能好」这条线全在 app.log 与
@@ -1191,6 +1326,7 @@ static NSString *bluetooth_diagnostic_report(
             ? @"converged-skywalk-present"
             : (registry == BluetoothRegistryProbeMissing
                 ? @"supported-transport-missing" : @"unavailable"));
+    NSString *survey = bt_transport_survey();
 #ifdef SHOWCASE_ROOTLESS
     NSString *layout = @"rootless";
 #else
@@ -1257,6 +1393,12 @@ static NSString *bluetooth_diagnostic_report(
             : "gone"];
     [report appendFormat:@"guard_sh=%s\n", g_guard_sh_path ?: "(none)"];
     [report appendFormat:@"retry=%@\n", retryAttempted ? @"yes" : @"no"];
+    /* 传输层到底暴露成什么，直接看这一块：iOS 14 上 skywalk 名字可能不同，
+     * 而 netgraph 的 com.apple.uart.bluetooth 未必存在。 */
+    [report appendFormat:@"\nbt_survey:\n%@", survey];
+    if (daemonTransport.length)
+        [report appendFormat:@"\ndaemon transport trace:\n%@\n",
+                               daemonTransport];
     if (initial.length)
         [report appendFormat:@"\ncarplay_bt tail:\n%@\n", initial];
     if (retry.length)
