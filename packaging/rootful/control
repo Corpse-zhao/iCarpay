@@ -1,0 +1,19 @@
+Package: com.corpsezhao.icarpay
+Name: iCarpay
+Version: @PACKAGE_VERSION@
+Architecture: iphoneos-arm
+Section: Utilities
+Maintainer: Corpse-zhao
+Author: Corpse-zhao
+Depends: firmware (>= 14.0), uikittools
+Conflicts: ch.ringwald.btstack, com.rostane.showcase
+Replaces: ch.ringwald.btstack (<= 1.1-1)
+Homepage: https://github.com/Corpse-zhao/iCarpay
+Description: iCarpay — 本机 CarPlay 车机端
+ Turn a jailbroken iPhone into a wireless CarPlay head unit.
+ The iPhone pairs over Bluetooth, joins the receiver's hotspot, then the
+ encrypted CarPlay video stream is decoded on-device and touches are sent back.
+ .
+ Derived from Showcase (GPL-3.0-or-later) by Amine Rostane.
+ rootful build (iphoneos-arm) for unc0ver / checkra1n style jailbreaks:
+ real /Applications, /usr/bin, /Library/LaunchDaemons, no jbroot prefix.

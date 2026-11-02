@@ -499,8 +499,10 @@ static int run_blocking(const char *path, char *const argv[]);
 /* Exists while BTstack owns the controller; the Taurine package's BTQuiet
  * throttles Bluetooth clients' reconnects only then. /tmp is emptied at boot. */
 #define BT_OWNED_FLAG "/tmp/showcase_bt_owned"
-#ifdef SHOWCASE_TAURINE
-/* Controller init takes about thirty seconds on an A10 iPad on iOS 14. */
+#if defined(SHOWCASE_TAURINE) || defined(ICARPAY_SLOW_BT_READY)
+/* Controller init takes about thirty seconds on an A10 iPad on iOS 14.
+ * iOS 14 的 BT 初始化整体比 16 慢，rootful 包（unc0ver/checkra1n）编这个分支，
+ * 免得把「慢」当成「失败」。 */
 #define BT_READY_SECONDS 45
 #define BT_RETRY_READY_SECONDS 45
 #else

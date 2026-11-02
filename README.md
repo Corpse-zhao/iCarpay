@@ -2,7 +2,7 @@
 
 > 在越狱 iPhone 上把 CarPlay 的两端都跑起来：本机可以自己进入 CarPlay 界面，也可以充当车机（Head Unit）让别的 iPhone 无线连进来。
 
-当前版本 `0.1.14` — **M1（蓝牙接管）已完成**：0.1.10 起真机可跑通全链路，另一台 iPhone 能发现设备 → 蓝牙配对 → iAP2/BAA 认证 → 加入热点 → AirPlay 收流解码 → 画面正常显示。现在是稳定性与体验阶段（启动耗时、触摸回传、退出后资源归还）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+当前版本 `0.1.16` — **M1（蓝牙接管）已完成**：0.1.10 起真机可跑通全链路，另一台 iPhone 能发现设备 → 蓝牙配对 → iAP2/BAA 认证 → 加入热点 → AirPlay 收流解码 → 画面正常显示。现在是稳定性与体验阶段（启动耗时、触摸回传、退出后资源归还）。进度见 [docs/ROADMAP.md](docs/ROADMAP.md)，设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 两条产品线
 
@@ -13,11 +13,16 @@
 
 ## 产物
 
-**只出 deb，不出 ipa。**
+**只出 deb，不出 ipa。** 每次 CI 产出两个包，按越狱类型选：
 
-| 产物 | 装法 |
-|---|---|
-| `com.corpsezhao.icarpay_<version>_iphoneos-arm64e.deb` | roothide 越狱机 → Sileo 或 `dpkg -i` |
+| 产物 | 适用 | 装法 |
+|---|---|---|
+| `com.corpsezhao.icarpay_<version>_iphoneos-arm64e.deb` | roothide（iOS 15/16，随机 jbroot） | Sileo 或 `dpkg -i` |
+| `com.corpsezhao.icarpay_<version>_iphoneos-arm.deb` | rootful：unc0ver / checkra1n 系（iOS 14 及更早） | Sileo 或 `dpkg -i` |
+
+两者的差别只在打包层与编译宏：rootful 走真实的 `/Applications`、`/usr/bin`、
+`/Library/LaunchDaemons`，`jbroot` 前缀为空；roothide 用包管理器注入的 jbroot。
+功能代码是同一份，蓝牙初始化在 iOS 14 上放宽到 45 秒（`-DICARPAY_SLOW_BT_READY=1`）。
 
 0.1.9 之前 CI 会顺带打一个 `.ipa`，从 0.1.10 起不再构建。原因不是打包麻烦，而是权限结构：
 **HCI socket 只有 root 守护进程拿得到**，App 进程无论签得多自由都不行。ipa 装上去只是一个

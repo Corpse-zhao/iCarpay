@@ -1,0 +1,41 @@
+#!/bin/sh
+# iCarpay prerm (rootful) —— 卸载前停掉蓝牙守护进程，把蓝牙还给系统
+#
+# 顺序很重要：先杀 BTdaemon（它握着 HCI 控制器），再恢复 bluetoothd。
+# 反过来做，bluetoothd 起来了也拿不到控制器，表现就是开关灰掉、只能重启。
+set -e
+
+PLIST="/Library/LaunchDaemons/ch.ringwald.BTstack.plist"
+BLUETOOTHD="/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
+
+LAUNCHCTL=""
+for t in /bin/launchctl /usr/bin/launchctl /usr/sbin/launchctl; do
+    if [ -x "$t" ]; then LAUNCHCTL="$t"; break; fi
+done
+KILLALL=""
+for k in /usr/bin/killall /bin/killall /usr/sbin/killall; do
+    if [ -x "$k" ]; then KILLALL="$k"; break; fi
+done
+
+if [ -n "$LAUNCHCTL" ] && [ -f "$PLIST" ]; then
+    "$LAUNCHCTL" unload "$PLIST" 2>/dev/null || true
+fi
+
+# 接管期间 bluetoothd 是被 `bootout` 摘掉的。bootout 掉的服务用 `load`
+# 拉不回来 —— 必须 enable + bootstrap 重新注册，这是"卸载后蓝牙再也打不开、
+# 只能重启"的直接原因。
+if [ -n "$KILLALL" ]; then
+    "$KILLALL" -9 BTdaemon 2>/dev/null || true
+fi
+rm -f /tmp/BTstack 2>/dev/null || true
+
+if [ -n "$LAUNCHCTL" ]; then
+    "$LAUNCHCTL" enable system/com.apple.bluetoothd 2>/dev/null || true
+    "$LAUNCHCTL" bootstrap system "$BLUETOOTHD" 2>/dev/null || true
+    "$LAUNCHCTL" load "$BLUETOOTHD" 2>/dev/null || true
+    if [ -n "$KILLALL" ] && ! "$KILLALL" -0 bluetoothd 2>/dev/null; then
+        "$LAUNCHCTL" kickstart -k system/com.apple.bluetoothd 2>/dev/null || true
+    fi
+fi
+
+exit 0

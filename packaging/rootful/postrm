@@ -1,0 +1,14 @@
+#!/bin/sh
+# iCarpay postrm (rootful) —— 清运行时残留，刷新图标缓存
+set -e
+
+rm -f /tmp/BTstack 2>/dev/null || true
+
+for t in /usr/bin/uicache /bin/uicache; do
+    if [ -x "$t" ]; then
+        "$t" -a 2>/dev/null || true
+        break
+    fi
+done
+
+exit 0

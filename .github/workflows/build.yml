@@ -8,9 +8,22 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # roothide（iOS 15/16，随机 jbroot，Sileo 只认 iphoneos-arm64e）
+          - variant: roothide
+            arch: iphoneos-arm64e
+            cflags: "-DSHOWCASE_ROOTLESS=1"
+            debian: packaging/roothide
+          # rootful（unc0ver / checkra1n 系，真 /Applications、/usr/bin）
+          - variant: rootful
+            arch: iphoneos-arm
+            cflags: "-DICARPAY_SLOW_BT_READY=1"
+            debian: packaging/rootful
     env:
-      # roothide 只认这个 Architecture，写错 Sileo 直接拒装
-      PKG_ARCH: iphoneos-arm64e
+      PKG_ARCH: ${{ matrix.arch }}
       PKG_ID: com.corpsezhao.icarpay
 
     steps:
@@ -140,7 +153,7 @@ jobs:
               -Wno-deprecated-declarations -Wno-unused-command-line-argument"
 
           # 主 App
-          clang $CF -DSHOWCASE_ROOTLESS=1 \
+          clang $CF ${{ matrix.cflags }} \
             -DAPP_VERSION=\"$PKG_VERSION\" -DPACKAGE_VERSION=\"$PKG_VERSION\" \
             -o build/Showcase source/Showcase.m \
             -Wl,-undefined,dynamic_lookup \
@@ -149,13 +162,13 @@ jobs:
 
           # 蓝牙辅助（唯一链接 libBTstack 的）
           # -undefined,error：缺符号必须在构建期炸，不许等到设备上 dyld 崩
-          clang $CF -DSHOWCASE_ROOTLESS=1 \
+          clang $CF ${{ matrix.cflags }} \
             -o build/CarDisplaySim source/carplay_bt.m build/libBTstack.dylib \
             -Wl,-undefined,error \
             -framework Foundation -framework Security
 
           # AirPlay / 认证服务
-          clang $CF -DSHOWCASE_ROOTLESS=1 \
+          clang $CF ${{ matrix.cflags }} \
             -o build/carplay_services source/carplay_services.m source/carplay_pair.c \
             source/vendor/monocypher/monocypher.c \
             source/vendor/monocypher/monocypher-ed25519.c \
@@ -203,7 +216,7 @@ jobs:
           cp -R source/Localizations/*.lproj "$APP/"
           cp source/ent_*.xml          "$P/usr/share/icarpay/"
           cp build/BTdaemon            "$P/usr/bin/BTdaemon"
-          cp packaging/roothide/ch.ringwald.BTstack.plist "$P/Library/LaunchDaemons/"
+          cp ${{ matrix.debian }}/ch.ringwald.BTstack.plist "$P/Library/LaunchDaemons/"
 
           find "$P" -name '.DS_Store' -delete
           find "$P" -type f | sort
@@ -232,7 +245,7 @@ jobs:
           DEB="build/${PKG_ID}_${PKG_VERSION}_${PKG_ARCH}.deb"
           python3 tools/make_deb.py \
             --payload build/payload \
-            --debian  packaging/roothide \
+            --debian  ${{ matrix.debian }} \
             --version "$PKG_VERSION" \
             --arch    "$PKG_ARCH" \
             --out     "$DEB"
@@ -263,20 +276,29 @@ jobs:
                   ti = names[s]
                   assert ti.mode == 0o755, "%s 权限必须是 0755，实际 %o" % (s, ti.mode)
               ctl = tf.extractfile(names["control"]).read().decode()
-              assert "Architecture: iphoneos-arm64e" in ctl, "Architecture 必须是 iphoneos-arm64e"
+              arch = os.environ["PKG_ARCH"]
+              assert ("Architecture: " + arch) in ctl, "Architecture 必须是 " + arch
               assert "Package: com.corpsezhao.icarpay" in ctl
-              print("control OK / 脚本权限 OK")
+              print("control OK / 脚本权限 OK / arch=%s" % arch)
 
           with tarfile.open(fileobj=io.BytesIO(members["data.tar.gz"]), mode="r:gz") as tf:
-              names = [ti.name for ti in tf.getmembers()]
+              entries = {ti.name.lstrip("./"): ti for ti in tf.getmembers()}
+              names = ["./" + k for k in entries]
               for bad in names:
-                  assert not bad.startswith("./var/jb"), "roothide 不能带 var/jb 前缀: " + bad
-              must = ["./Applications/iCarpay.app/Showcase",
-                      "./Applications/iCarpay.app/CarPlay Simulator",
-                      "./usr/bin/BTdaemon",
-                      "./Library/LaunchDaemons/ch.ringwald.BTstack.plist"]
+                  assert not bad.startswith("./var/jb"), "包内不能带 var/jb 前缀: " + bad
+              must = ["Applications/iCarpay.app/Showcase",
+                      "Applications/iCarpay.app/CarPlay Simulator",
+                      "usr/bin/BTdaemon",
+                      "Library/LaunchDaemons/ch.ringwald.BTstack.plist"]
               for m in must:
-                  assert m in names, "缺文件: " + m
+                  assert m in entries, "缺文件: " + m
+              # 占位符只属于 roothide：rootful 的 plist 必须是真实绝对路径
+              plist = tf.extractfile(entries["Library/LaunchDaemons/ch.ringwald.BTstack.plist"]).read().decode()
+              if arch.endswith("arm64e"):
+                  assert "__JBROOT__" in plist, "roothide 版 plist 必须保留 __JBROOT__"
+              else:
+                  assert "__JBROOT__" not in plist, "rootful 版 plist 不能有占位符"
+                  assert "<string>/usr/bin/BTdaemon</string>" in plist, "rootful plist 必须写 /usr/bin/BTdaemon"
               print("payload 共 %d 项" % len(names))
           print("✅ 包结构校验通过")
           PY
@@ -284,6 +306,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: icarpay
+          name: icarpay-${{ matrix.variant }}
           path: build/*.deb
           if-no-files-found: error

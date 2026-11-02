@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ch.ringwald.BTstack</string>
+	<!-- rootful 布局：真实绝对路径，不需要 __JBROOT__ 占位符 -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/BTdaemon</string>
+	</array>
+	<!-- 不做 socket 激活：BTdaemon 编译时开了 HAVE_UNIX_SOCKETS，
+	     自己在 /tmp/BTstack 上 bind + listen（见 socket_connection.c）。
+	     交给 launchd 代建 socket 反而会与自建路径打架。 -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/var/log/BTstack.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/BTstack.log</string>
+</dict>
+</plist>
