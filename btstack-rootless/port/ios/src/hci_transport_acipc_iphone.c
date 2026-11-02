@@ -90,54 +90,17 @@ typedef struct {
     acipc_free_t free_transport;
 } acipc_api_t;
 
-/* ── Block 字面量 ─────────────────────────────────────────────────────
- * The transport _Block_copy()s the status block, so it has to be a real
- * object with a valid descriptor.  Building it by hand keeps this file free
- * of -fblocks and, being a global block, makes _Block_copy a no-op. */
+/* ── 状态 block ───────────────────────────────────────────────────────
+ * Create() 会对 params+0x10 做一次 _Block_copy，所以必须给一个真实 block。
+ * 用 clang 的 block 字面量（构建脚本已加 -fblocks），比手搓 isa/descriptor
+ * 更贴近运行时约定，也省掉一类难查的崩溃。 */
 
-extern void *_NSConcreteGlobalBlock[32];
-
-struct acipc_block_descriptor {
-    unsigned long reserved;
-    unsigned long size;
-    void *copy;
-    void *dispose;
-    const char *signature;
-};
-
-struct acipc_block_literal {
-    void *isa;
-    volatile int flags;
-    int reserved;
-    void (*invoke)(void *, ...);
-    struct acipc_block_descriptor *descriptor;
-};
-
-#define ACIPC_BLOCK_IS_GLOBAL (1 << 28)
-#define ACIPC_BLOCK_HAS_SIGNATURE (1 << 30)
-
-static void acipc_status_invoke(void *block, int status, uint32_t a,
-                                uint32_t b) {
-    (void)block;
+static void acipc_status_block_body(int status, uint32_t a, uint32_t b) {
     (void)status;
     (void)a;
     (void)b;
-    /* Event notifications are already surfaced through Read(); nothing to do
-     * here other than stay ABI-compatible. */
+    /* 事件通知已由 Read() 暴露出来，这里只是把回调位置占住 */
 }
-
-static struct acipc_block_descriptor acipc_status_descriptor = {
-    0, sizeof(struct acipc_block_literal), NULL, NULL,
-    "v20@?0i8I12I16"
-};
-
-static struct acipc_block_literal acipc_status_block = {
-    (void *)&_NSConcreteGlobalBlock,
-    ACIPC_BLOCK_IS_GLOBAL | ACIPC_BLOCK_HAS_SIGNATURE,
-    0,
-    acipc_status_invoke,
-    &acipc_status_descriptor
-};
 
 /* ── 传输层状态 ─────────────────────────────────────────────────────── */
 
@@ -164,6 +127,11 @@ typedef struct {
     int tx_shape_logged;
     int tx_framed;          /* 写的时候是否带 H4 类型字节 */
     int rx_framed;          /* 读回来是否带 H4 类型字节 */
+
+    /* present() 阶段探测出来的可用组合，open() 直接复用 */
+    int good_fill_first;
+    int good_force_revision;
+    int good_interface;
 
     btstack_data_source_t wake_data_source;
     int wake_data_source_registered;
@@ -243,39 +211,136 @@ static int load_api(void) {
     return 1;
 }
 
-/* 真正建一次传输再释放，作为"这台机器能用 ACIPC"的证据。
- * 只判断库存在是不够的：iOS 12/13 的 iPhone X 之类根本没有 PCIe 蓝牙，
- * Create 会失败，这时候必须老老实实退回 UART。 */
-static int acipc_try_create(int interface_number, void **out_handle) {
-    acipc_params_t params;
-    memset(&params, 0, sizeof(params));
-    acipc.api.init_parameters(&params);
+/* ── 参数装配 ─────────────────────────────────────────────────────────
+ * 0.1.26 在设备上只吐出一行 rc=0x0 handle=0x0，把范围缩到很小。回来看
+ * AppleConvergedTransportInitParameters 的反汇编，它根本不是"填充默认值"，
+ * 而是**校验**：
+ *
+ *   0x10000b3e4  cbz  x0, fail                ; params == NULL -> 0
+ *   0x10000b414  cmp  w8, #5                  ; p[0] >= 5   -> 0
+ *   0x10000b4a0  ldr  x8, [x19, #0x10]        ; p+0x10 = 回调 block
+ *   0x10000b4a4  cbz  x8, fail                ; block == NULL -> 0
+ *   0x10000b4a8  mov  w0, #1                  ; 全合规 -> 1
+ *
+ * 而 revision=0x15 是由另一个小尾段写的（0x10000b3c4..0x10000b3e0）。
+ * 原写法是"先 Init 再填 block"，调用 Init 的那一刻 block 还是 NULL，
+ * 于是它返回 0、revision 停在 0，Create 随后拒绝 —— 与日志完全对上。
+ *
+ * 现在先填字段再叫 Init，并把"顺序 × 是否强制 revision"的四种组合都试
+ * 一遍，跑一次就能拿到全部答案，不再让用户来回试包。
+ * 另外：daemon 的 stdout 不进日志文件，打点一律走 log_info。 */
 
+static void (^acipc_status_block)(int, uint32_t, uint32_t) = NULL;
+
+static void *acipc_status_block_get(void) {
+    if (!acipc_status_block) {
+        acipc_status_block = ^(int st, uint32_t a, uint32_t b) {
+            acipc_status_block_body(st, a, b);
+        };
+    }
+    return (void *)acipc_status_block;
+}
+
+static void *acipc_queue_get(void) {
     if (!acipc.queue) {
         acipc.queue = (void *)dispatch_queue_create(
             "com.corpsezhao.icarpay.acipc", DISPATCH_QUEUE_SERIAL);
     }
-    params.interface_number = (uint32_t)interface_number;
-    params.queue = acipc.queue;
-    params.status_block = &acipc_status_block;
-    params.timeout_ms = 1000;
-    params.flags = (interface_number == 2) ? 8u : 0u;
+    return acipc.queue;
+}
+
+static void acipc_fill(acipc_params_t *p, int interface_number) {
+    p->interface_number = (uint32_t)interface_number;
+    p->queue = acipc_queue_get();
+    p->status_block = acipc_status_block_get();
+    p->timeout_ms = 1000;
+    /* BlueTool 对接口 2 额外置 bit3 */
+    p->flags = (interface_number == 2) ? 8u : 0u;
+}
+
+static void acipc_log_params(const char *tag, const acipc_params_t *p) {
+    const uint64_t *q = (const uint64_t *)p;
+    log_info("acipc[%s] iface=%u queue=%p block=%p timeout=%u flags=%u rev=0x%x",
+             tag, p->interface_number, p->queue, p->status_block,
+             p->timeout_ms, p->flags, p->revision);
+    log_info("acipc[%s] raw %016llx %016llx %016llx %016llx %016llx %016llx "
+             "%016llx %016llx %016llx %016llx %016llx",
+             tag,
+             (unsigned long long)q[0], (unsigned long long)q[1],
+             (unsigned long long)q[2], (unsigned long long)q[3],
+             (unsigned long long)q[4], (unsigned long long)q[5],
+             (unsigned long long)q[6], (unsigned long long)q[7],
+             (unsigned long long)q[8], (unsigned long long)q[9],
+             (unsigned long long)q[10]);
+}
+
+/* 返回 0 = 真的拿到了传输对象 */
+static int acipc_attempt(int interface_number, int fill_first,
+                         int force_revision, void **out_handle) {
+    acipc_params_t params;
+    memset(&params, 0, sizeof(params));
+    int init_rc = 0;
+
+    if (fill_first) {
+        acipc_fill(&params, interface_number);
+        init_rc = acipc.api.init_parameters(&params);
+    } else {
+        init_rc = acipc.api.init_parameters(&params);
+        acipc_fill(&params, interface_number);
+    }
+    if (force_revision) params.revision = 0x15;
+
+    log_info("acipc: attempt iface=%d fill_first=%d force_rev=%d init_rc=%d",
+             interface_number, fill_first, force_revision, init_rc);
+    acipc_log_params("params", &params);
 
     void *handle = NULL;
     int rc = acipc.api.create(&params, &handle);
-    if (!rc || !handle) {
-        log_info("acipc: Create(interface=%d) failed rc=0x%x handle=%p",
-                 interface_number, rc, handle);
-        return -1;
-    }
-    log_info("acipc: Create(interface=%d) ok handle=%p revision=%u",
-             interface_number, handle, params.revision);
+    log_info("acipc: attempt iface=%d -> create rc=%d(0x%x) handle=%p",
+             interface_number, rc, rc, handle);
+    /* handle 是唯一可靠判据：Create 的返回值语义在不同版本上不一致 */
+    if (!handle) return -1;
     *out_handle = handle;
     return 0;
 }
 
+static int acipc_try_create_ex(int interface_number, int full_matrix,
+                               void **out_handle) {
+    for (int fill_first = 1; fill_first >= 0; fill_first--) {
+        for (int force_revision = 0; force_revision <= 1; force_revision++) {
+            if (acipc_attempt(interface_number, fill_first, force_revision,
+                              out_handle) == 0) {
+                acipc.good_fill_first = fill_first;
+                acipc.good_force_revision = force_revision;
+                acipc.good_interface = interface_number;
+                log_info("acipc: WORKING combination iface=%d fill_first=%d "
+                         "force_rev=%d",
+                         interface_number, fill_first, force_revision);
+                return 0;
+            }
+            /* 只有第一个接口值得把四种组合都试一遍，不然启动太慢 */
+            if (!full_matrix) break;
+        }
+        if (!full_matrix) break;
+    }
+    return -1;
+}
+
+static int acipc_try_create(int interface_number, void **out_handle) {
+    return acipc_try_create_ex(interface_number, 0, out_handle);
+}
+
 int hci_transport_acipc_iphone_present(void) {
-    if (!load_api()) return 0;
+    log_info("acipc: probe start");
+
+    if (!load_api()) {
+        log_info("acipc: library unavailable, standing down");
+        return 0;
+    }
+    log_info("acipc: library loaded init=%p create=%p read=%p write=%p free=%p",
+             (void *)acipc.api.init_parameters, (void *)acipc.api.create,
+             (void *)acipc.api.read, (void *)acipc.api.write,
+             (void *)acipc.api.free_transport);
 
     /* iOS 15+ 已经有 Skywalk nexus 那条成熟路径，别在这里抢方向盘 */
     char version[32] = {0};
@@ -283,15 +348,23 @@ int hci_transport_acipc_iphone_present(void) {
     if (sysctlbyname("kern.osproductversion", version, &version_len, NULL,
                      0) == 0) {
         int major = atoi(version);
-        if (major >= 15) return 0;
+        log_info("acipc: ios %s (major=%d)", version, major);
+        if (major >= 15) {
+            log_info("acipc: ios>=15 keeps the skywalk path, standing down");
+            return 0;
+        }
     }
 
-    for (int iface = 1; iface <= 2; iface++) {
+    static const int order[] = {1, 2, 0, 3, 4};
+    for (unsigned i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
         void *handle = NULL;
-        if (acipc_try_create(iface, &handle) == 0) {
-            acipc.api.free_transport(handle);
+        /* 第一个接口把"顺序 × revision"四种组合都试掉，剩下的只试最优形态 */
+        if (acipc_try_create_ex(order[i], i == 0, &handle) == 0) {
+            /* 保留这个 handle：open() 直接接着用，避免释放后重新竞争通道 */
+            acipc.handle = handle;
+            acipc.interface_number = order[i];
             log_info("acipc: interface %d is usable, taking the PCIe path",
-                     iface);
+                     order[i]);
             return 1;
         }
     }
@@ -486,14 +559,29 @@ static int transport_open(void) {
     acipc.queue_tail = NULL;
     acipc.queue_count = 0;
 
-    /* 接口 1 / 2 都试一遍，和 BlueTool 的选择顺序一致 */
-    for (int iface = 1; iface <= 2; iface++) {
-        void *handle = NULL;
-        if (acipc_try_create(iface, &handle) == 0) {
-            acipc.handle = handle;
-            acipc.interface_number = iface;
-            break;
+    /* present() 如果已经建好并保留了句柄，直接接管，别释放再抢一次 */
+    if (!acipc.handle) {
+        /* 接口 1 / 2 优先，和 BlueTool 的选择顺序一致 */
+        int candidates[5];
+        int count = 0;
+        if (acipc.good_interface > 0) candidates[count++] = acipc.good_interface;
+        for (int iface = 1; iface <= 4; iface++) {
+            int seen = 0;
+            for (int k = 0; k < count; k++)
+                if (candidates[k] == iface) seen = 1;
+            if (!seen) candidates[count++] = iface;
         }
+        for (int i = 0; i < count; i++) {
+            void *handle = NULL;
+            if (acipc_try_create(candidates[i], &handle) == 0) {
+                acipc.handle = handle;
+                acipc.interface_number = candidates[i];
+                break;
+            }
+        }
+    } else {
+        log_info("acipc: reusing the handle created during probe (iface=%d)",
+                 acipc.interface_number);
     }
     if (!acipc.handle) {
         log_error("acipc: no ACIPC bluetooth interface could be opened");

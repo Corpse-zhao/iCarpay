@@ -31,7 +31,9 @@ SRC_M=(
   $ROOT/platform/corefoundation/rfcomm_service_db_corefoundation.m
   $ROOT/port/ios/src/btstack_control_iphone.m $ROOT/port/ios/src/platform_iphone.m
 )
-CFLAGS=( -isysroot $SDK -arch arm64 -mios-version-min=12.0 -fno-objc-arc
+# iCarpay: -fblocks 是 ACIPC 传输层必需的 —— AppleConvergedTransportCreate
+# 会对 params+0x10 的 block 做 _Block_copy，没有 block 运行时支持就建不起来。
+CFLAGS=( -isysroot $SDK -arch arm64 -mios-version-min=12.0 -fno-objc-arc -fblocks
   -I$ROOT/port/ios -I$ROOT/port/ios/src -I$ROOT/platform/daemon/src
   -I$ROOT/platform/posix -I$ROOT/platform/corefoundation -I$ROOT/src
   -O2 -Wno-deprecated-declarations -Wno-deprecated-non-prototype

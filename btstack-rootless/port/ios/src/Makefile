@@ -52,6 +52,10 @@ BTdaemon_CFLAGS = \
 	-I$(BTSTACK_ROOT)/platform/daemon/src \
 	-I$(BTSTACK_ROOT)/platform/corefoundation \
 	-I..
+# ACIPC 传输层用了 block 字面量（AppleConvergedTransportCreate 要求
+# params+0x10 是个真 block），没有 -fblocks 编译不过。
+BTdaemon_OBJCFLAGS = -fblocks
+BTdaemon_CCFLAGS = -fblocks
 BTdaemon_PRIVATE_FRAMEWORKS = IOKit
 
 
