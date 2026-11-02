@@ -1076,12 +1076,12 @@ static BluetoothRegistryProbeState bluetooth_registry_probe(void) {
  * 相关的类名与方法名挖出来 —— ObjC 元数据都在字符串里。 */
 static void recon_extract_context(NSMutableString *out, const char *base,
                                   size_t len, size_t pos, const char *tag) {
-    size_t lo = pos > 600 ? pos - 600 : 0;
-    size_t hi = pos + 600 < len ? pos + 600 : len;
+    size_t lo = pos > 900 ? pos - 900 : 0;
+    size_t hi = pos + 900 < len ? pos + 900 : len;
     [out appendFormat:@"--- %s @%zu ---\n", tag, pos];
     size_t i = lo;
     int printed = 0;
-    while (i < hi && printed < 14) {
+    while (i < hi && printed < 18) {
         while (i < hi && (base[i] < 32 || base[i] > 126)) i++;
         size_t start = i;
         while (i < hi && base[i] >= 32 && base[i] <= 126) i++;
@@ -1090,6 +1090,59 @@ static void recon_extract_context(NSMutableString *out, const char *base,
             printed++;
         }
     }
+}
+
+/* BlueTool 里内嵌的 XML plist 很可能就是 ACIPC pipe 的权威配置
+ * （M1 上同样的东西在驱动 Info.plist 里声明了 hci/sco/acl/debug 四条 pipe）。
+ * 找到 "<?xml"…"``</plist>" 整段，只打和 ACIPC 相关的，完整落盘不截断。 */
+static void recon_extract_plists(NSMutableString *out, const char *base,
+                                 size_t len) {
+    static const char openTag[] = "<?xml";
+    size_t pos = 0;
+    int printed = 0;
+    while (pos + sizeof(openTag) <= len && printed < 2) {
+        const void *found = memmem(base + pos, len - pos, openTag,
+                                   sizeof(openTag) - 1);
+        if (!found) break;
+        size_t at = (size_t)((const char *)found - base);
+        const void *end = memmem(base + at, len - at, "</plist>", 8);
+        if (!end) { pos = at + sizeof(openTag) - 1; continue; }
+        size_t stop = (size_t)((const char *)end - base) + 8;
+        size_t seg = stop - at;
+        if (seg > 16000) seg = 16000;
+        const char *segp = base + at;
+        if ((memmem(segp, seg, "AppleConverged", 14) ||
+             memmem(segp, seg, "ACIPC", 5) ||
+             memmem(segp, seg, "pipe", 4)) &&
+            out.length < 24000) {
+            [out appendFormat:
+                @"\n=== embedded plist #%d (%zu bytes) ===\n", ++printed,
+                seg];
+            [out appendFormat:@"%.*s\n", (int)seg, segp];
+        }
+        pos = stop;
+    }
+}
+
+/* 把侦察对象拷到 /var/mobile/Documents，用户可以用 Filza / 微信把文件
+ * 直接发出去做深度分析（诊断弹窗能贴的字数有限）。 */
+static void recon_share_copy(const char *src, NSString *dstName,
+                             NSMutableString *out) {
+    if (access(src, R_OK) != 0) return;
+    NSString *docs = @"/var/mobile/Documents";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:docs
+          withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSString *dst = [docs stringByAppendingPathComponent:dstName];
+    if (![fm fileExistsAtPath:dst]) {
+        [fm copyItemAtPath:[NSString stringWithUTF8String:src]
+                    toPath:dst error:NULL];
+    }
+    chmod(dst.fileSystemRepresentation, 0644);
+    chown(dst.fileSystemRepresentation, 501, 501);
+    [out appendFormat:@"recon_copy=%@ -> %@ (%@)\n",
+        [NSString stringWithUTF8String:src], dstName,
+        [fm fileExistsAtPath:dst] ? @"ok" : @"FAILED"];
 }
 
 static void recon_scan_file(NSMutableString *out, const char *path,
@@ -1127,16 +1180,51 @@ static NSString *bt_recon_userspace(void) {
     if (out.length > 8000) return out;
 
     static const char *const binaries[] = {
-        "/usr/sbin/BTServer", "/usr/libexec/BTServer",
-        "/usr/sbin/BlueTool", "/usr/libexec/BlueTool", NULL,
+        "/usr/sbin/BlueTool", "/usr/sbin/BTServer",
+        "/usr/lib/ACIPCBTLib.dylib", "/usr/lib/AppleConvergedTransport.dylib",
+        "/usr/libexec/BTServer", "/usr/libexec/BlueTool", NULL,
     };
     static const char *const needles[] = {
         "AppleConvergedIPC", "AppleBluetoothModule", "OLYBT", "ACIPC",
-        "skywalk", "nexus", "uart.bluetooth", NULL,
+        "AppleBTHciUC", "AppleBTMgmtUC", "AppleConvergedTransport",
+        "skywalk", "nexus", "uart.bluetooth", "UserClient",
+        "send_hci", "hcicmd", "boot/hci", NULL,
     };
 
-    for (int b = 0; binaries[b]; b++)
-        recon_scan_file(out, binaries[b], needles, 3);
+    for (int b = 0; binaries[b]; b++) {
+        int fd = open(binaries[b], O_RDONLY);
+        if (fd < 0) continue;
+        struct stat st;
+        off_t size = (fstat(fd, &st) == 0) ? st.st_size : 0;
+        close(fd);
+        if (size <= 0) continue;
+
+        /* 先按 needle 打上下文；BlueTool 另外抽内嵌 plist */
+        NSMutableString *perBinary = [NSMutableString string];
+        recon_scan_file(perBinary, binaries[b], needles, 3);
+        if (strstr(binaries[b], "BlueTool")) {
+            int fd2 = open(binaries[b], O_RDONLY);
+            if (fd2 >= 0) {
+                struct stat st2;
+                if (fstat(fd2, &st2) == 0 && st2.st_size > 0) {
+                    size_t len = (size_t)st2.st_size;
+                    void *map = mmap(NULL, len, PROT_READ, MAP_PRIVATE,
+                                     fd2, 0);
+                    close(fd2);
+                    if (map != MAP_FAILED) {
+                        recon_extract_plists(perBinary, map, len);
+                        munmap(map, len);
+                    }
+                } else {
+                    close(fd2);
+                }
+            }
+        }
+        if (perBinary.length) {
+            [out appendFormat:@"\n[%s]\n", binaries[b]];
+            [out appendString:perBinary];
+        }
+    }
 
     /* MobileBluetooth.framework 在 dyld 共享缓存里；ObjC 类/方法名是明文 */
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -1144,13 +1232,29 @@ static NSString *bt_recon_userspace(void) {
     NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:dir error:NULL];
     for (NSString *name in files) {
         if (![name hasPrefix:@"dyld_shared_cache"]) continue;
-        if (out.length > 12000) { [out appendString:@"(recon truncated)\n"]; break; }
+        if (out.length > 20000) { [out appendString:@"(recon truncated)\n"]; break; }
         recon_scan_file(out, [[dir stringByAppendingPathComponent:name]
                                  fileSystemRepresentation],
                         needles, 3);
     }
 
     if (!out.length) return @"(no BTServer / shared cache found)\n";
+
+    /* 全文落盘 + 把二进制本身拷出来，绕开诊断弹窗的字数限制 */
+    recon_share_copy("/usr/sbin/BlueTool", @"icarpay-BlueTool.bin", out);
+    recon_share_copy("/usr/sbin/BTServer", @"icarpay-BTServer.bin", out);
+    recon_share_copy("/usr/lib/ACIPCBTLib.dylib", @"icarpay-ACIPCBTLib.bin",
+                     out);
+    recon_share_copy("/usr/lib/AppleConvergedTransport.dylib",
+                     @"icarpay-ACIPCTransport.bin", out);
+    NSString *savePath = @"/var/mobile/Documents/icarpay-recon.txt";
+    [out writeToFile:savePath atomically:YES
+            encoding:NSUTF8StringEncoding error:NULL];
+    chmod(savePath.fileSystemRepresentation, 0644);
+    chown(savePath.fileSystemRepresentation, 501, 501);
+    [out appendFormat:@"\nrecon_saved=%@ (%lu bytes)\n", savePath,
+        (unsigned long)[[fm attributesOfItemAtPath:savePath error:NULL]
+            fileSize]);
     return out;
 }
 
