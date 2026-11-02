@@ -1175,6 +1175,10 @@ static void recon_scan_file(NSMutableString *out, const char *path,
     munmap(map, len);
 }
 
+static NSString *dump_cache_image(NSString *cachePath, NSString *wantedSuffix,
+                                 NSString *outputName);
+static NSString *transport_api_probe(void);
+
 static NSString *bt_recon_userspace(void) {
     NSMutableString *out = [NSMutableString string];
     if (out.length > 8000) return out;
@@ -1240,6 +1244,37 @@ static NSString *bt_recon_userspace(void) {
 
     if (!out.length) return @"(no BTServer / shared cache found)\n";
 
+    /* 把 AppleConvergedTransport.dylib / ACIPCBTLib.dylib 从共享缓存里抠出来 */
+    NSString *cacheDir = @"/System/Library/Caches/com.apple.dyld";
+    NSString *cacheFile = nil;
+    for (NSString *n in [fm contentsOfDirectoryAtPath:cacheDir error:NULL]) {
+        if ([n hasPrefix:@"dyld_shared_cache_arm64e"]) {
+            cacheFile = [cacheDir stringByAppendingPathComponent:n];
+            break;
+        }
+    }
+    if (!cacheFile) {
+        for (NSString *n in [fm contentsOfDirectoryAtPath:cacheDir error:NULL]) {
+            if ([n hasPrefix:@"dyld_shared_cache_arm64"]) {
+                cacheFile = [cacheDir stringByAppendingPathComponent:n];
+                break;
+            }
+        }
+    }
+    if (cacheFile) {
+        [out appendFormat:@"\ncache=%@\n", cacheFile];
+        [out appendFormat:@"dump_transport=%@\n",
+            dump_cache_image(cacheFile, @"AppleConvergedTransport.dylib",
+                             @"icarpay-ACIPCTransport.dylib")];
+        [out appendFormat:@"dump_acipcbt=%@\n",
+            dump_cache_image(cacheFile, @"ACIPCBTLib.dylib",
+                             @"icarpay-ACIPCBTLib.dylib")];
+    } else {
+        [out appendString:@"\ncache=(not found)\n"];
+    }
+    [out appendString:@"\ntransport_api:\n"];
+    [out appendString:transport_api_probe()];
+
     /* 全文落盘 + 把二进制本身拷出来，绕开诊断弹窗的字数限制 */
     recon_share_copy("/usr/sbin/BlueTool", @"icarpay-BlueTool.bin", out);
     recon_share_copy("/usr/sbin/BTServer", @"icarpay-BTServer.bin", out);
@@ -1255,6 +1290,142 @@ static NSString *bt_recon_userspace(void) {
     [out appendFormat:@"\nrecon_saved=%@ (%lu bytes)\n", savePath,
         (unsigned long)[[fm attributesOfItemAtPath:savePath error:NULL]
             fileSize]];
+    return out;
+}
+
+/* ── 从 dyld 共享缓存里抠出单个 dylib ──────────────────────────
+ * AppleConvergedTransport.dylib 不在磁盘上（我们的 copy 失败了），
+ * 它在 2GB 的 dyld_shared_cache 里。这里按缓存头解析镜像表，找到目标
+ * 镜像后按 segment 把小文件完整抠出来，落到 Documents 供离线逆向。
+ * 只读，不修改缓存。 */
+typedef struct {
+    uint64_t vmaddr;
+    uint64_t size;
+    uint64_t fileOffset;
+    uint32_t maxProt;
+    uint32_t initProt;
+} icarpay_cache_mapping_t;
+
+static NSString *dump_cache_image(NSString *cachePath, NSString *wantedSuffix,
+                                 NSString *outputName) {
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:cachePath];
+    if (!fh) return @"(no cache file)";
+
+    NSData *header = [fh readDataOfLength:0x200];
+    if (header.length < 0x200) { [fh closeFile]; return @"(short header)"; }
+    const uint8_t *h = header.bytes;
+    if (memcmp(h, "dyld_v1", 7) != 0) { [fh closeFile]; return @"(bad magic)"; }
+    uint32_t mappingOffset = *(const uint32_t *)(h + 0x10);
+    uint32_t mappingCount  = *(const uint32_t *)(h + 0x14);
+    uint32_t imagesOffset  = *(const uint32_t *)(h + 0x18);
+    uint32_t imagesCount   = *(const uint32_t *)(h + 0x1c);
+    if (!mappingCount || !imagesCount) { [fh closeFile]; return @"(empty cache)"; }
+
+    [fh seekToFileOffset:mappingOffset];
+    NSData *mapData = [fh readDataOfLength:(NSUInteger)mappingCount * 32];
+    if (mapData.length < (NSUInteger)mappingCount * 32) { [fh closeFile]; return @"(mapping short)"; }
+
+    [fh seekToFileOffset:imagesOffset];
+    NSData *imgData = [fh readDataOfLength:(NSUInteger)imagesCount * 32];
+    if (imgData.length < (NSUInteger)imagesCount * 32) { [fh closeFile]; return @"(images short)"; }
+
+    const icarpay_cache_mapping_t *maps = mapData.bytes;
+    uint64_t imageAddr = 0;
+    for (uint32_t i = 0; i < imagesCount; i++) {
+        const uint8_t *rec = (const uint8_t *)imgData.bytes + i * 32;
+        uint64_t addr = *(const uint64_t *)(rec + 0);
+        uint32_t pathOff = *(const uint32_t *)(rec + 24);
+        [fh seekToFileOffset:pathOff];
+        NSData *pathData = [fh readDataOfLength:512];
+        if (!pathData.length) continue;
+        NSString *path = [NSString stringWithUTF8String:pathData.bytes];
+        if (path && [path hasSuffix:wantedSuffix]) { imageAddr = addr; break; }
+    }
+    if (!imageAddr) { [fh closeFile]; return @"(image not found in cache)"; }
+
+    /* 缓存里 vmaddr -> 文件偏移 */
+    icarpay_cache_mapping_t base = maps[0];
+    uint64_t hdrOff = imageAddr - base.vmaddr + base.fileOffset;
+    [fh seekToFileOffset:hdrOff];
+    NSData *machoHeader = [fh readDataOfLength:0x1000];
+    if (machoHeader.length < 32) { [fh closeFile]; return @"(macho header short)"; }
+    const uint8_t *mh = machoHeader.bytes;
+    if (*(const uint32_t *)mh != 0xfeedfacf) { [fh closeFile]; return @"(not mach64)"; }
+    uint32_t ncmds = *(const uint32_t *)(mh + 16);
+    uint32_t sizeofcmds = *(const uint32_t *)(mh + 20);
+    NSData *cmdsData = nil;
+    if (sizeofcmds + 32 > machoHeader.length) {
+        [fh seekToFileOffset:hdrOff];
+        cmdsData = [fh readDataOfLength:32 + sizeofcmds];
+        if (cmdsData.length < 32 + sizeofcmds) { [fh closeFile]; return @"(load cmds short)"; }
+        mh = cmdsData.bytes;
+    }
+
+    NSMutableData *output = [NSMutableData data];
+    uint32_t off = 32;
+    uint64_t totalSize = 0;
+    for (uint32_t c = 0; c < ncmds; c++) {
+        const uint8_t *lc = mh + off;
+        uint32_t cmd = *(const uint32_t *)lc;
+        uint32_t cmdsize = *(const uint32_t *)(lc + 4);
+        if (!cmdsize) break;
+        if (cmd == 0x19) { /* LC_SEGMENT_64 */
+            uint64_t vmaddr = *(const uint64_t *)(lc + 24);
+            uint64_t vmsize = *(const uint64_t *)(lc + 32);
+            uint64_t fileoff = *(const uint64_t *)(lc + 40);
+            uint64_t filesize = *(const uint64_t *)(lc + 48);
+            if (filesize) {
+                uint64_t srcOff = vmaddr - base.vmaddr + base.fileOffset;
+                [fh seekToFileOffset:srcOff];
+                NSData *seg = [fh readDataOfLength:(NSUInteger)filesize];
+                if (seg.length == (NSUInteger)filesize) {
+                    uint64_t want = (vmaddr - imageAddr) + filesize;
+                    if (output.length < want) {
+                        [output increaseLengthBy:(NSUInteger)(want - output.length)];
+                    }
+                    [output replaceBytesInRange:NSMakeRange((NSUInteger)(vmaddr - imageAddr),
+                                                            (NSUInteger)filesize)
+                                      withBytes:seg.bytes];
+                    totalSize += filesize;
+                }
+                (void)fileoff;
+                (void)vmsize;
+            }
+        }
+        off += cmdsize;
+    }
+    [fh closeFile];
+    if (!output.length) return @"(no segments copied)";
+
+    NSString *dst = [@"/var/mobile/Documents" stringByAppendingPathComponent:outputName];
+    [output writeToFile:dst atomically:YES];
+    chmod(dst.fileSystemRepresentation, 0644);
+    chown(dst.fileSystemRepresentation, 501, 501);
+    return [NSString stringWithFormat:@"%@ ok (%lu bytes) image@0x%llx",
+            outputName, (unsigned long)output.length, imageAddr];
+}
+
+static NSString *transport_api_probe(void) {
+    NSMutableString *out = [NSMutableString string];
+    void *handle = dlopen("/usr/lib/AppleConvergedTransport.dylib", RTLD_LAZY);
+    if (!handle) {
+        [out appendFormat:@"dlopen_failed=%s\n", dlerror()];
+        return out;
+    }
+    [out appendFormat:@"dlopen_ok handle=%p\n", handle];
+    static const char *const syms[] = {
+        "AppleConvergedTransportInitParameters",
+        "AppleConvergedTransportCreate",
+        "AppleConvergedTransportSendImage",
+        "AppleConvergedTransportRead",
+        "AppleConvergedTransportWrite",
+        "AppleConvergedTransportFree",
+        NULL,
+    };
+    for (int i = 0; syms[i]; i++) {
+        void *symbol = dlsym(handle, syms[i]);
+        [out appendFormat:@"  %s=%p\n", syms[i], symbol];
+    }
     return out;
 }
 
