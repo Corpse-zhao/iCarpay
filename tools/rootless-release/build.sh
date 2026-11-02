@@ -143,7 +143,6 @@ say "Compiling Showcase and its CarPlay helpers."
     -o "$BUILD/Showcase" "$PAYLOAD/Showcase.m" \
     -framework UIKit -framework AVFoundation -framework AudioToolbox \
     -framework CoreMedia -framework Foundation -framework Security \
-    -framework IOKit \
     -Wl,-undefined,dynamic_lookup >> "$LOG" 2>&1 || \
     fail "The Showcase app build failed."
 

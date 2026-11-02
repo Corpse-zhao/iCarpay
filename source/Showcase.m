@@ -18,7 +18,6 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreMedia/CoreMedia.h>
 #import <Security/Security.h>
-#import <IOKit/IOKitLib.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -1063,85 +1062,50 @@ static BluetoothRegistryProbeState bluetooth_registry_probe(void) {
  * 于是 BTstack 回落到 h4 之后必然 POWERON_FAILED。
  * 把 IORegistry 里这几类服务的真实属性打出来，才能判断这台机器把 HCI 暴露成什么，
  * 而不是继续猜。只进诊断报告，不参与任何判断。 */
-static NSString *survey_property_text(id value) {
-    if ([value isKindOfClass:[NSString class]]) {
-        NSString *text = value;
-        if (text.length > 96)
-            text = [[text substringToIndex:96] stringByAppendingString:@"..."];
-        return text;
-    }
-    if ([value isKindOfClass:[NSData class]]) {
-        NSData *data = (NSData *)value;
-        NSUInteger length = data.length;
-        /* nexus UUID 有可能以裸 16 字节存在，那就按 UUID 格式打出来 */
-        if (length == 16) {
-            const unsigned char *bytes = data.bytes;
-            return [NSString stringWithFormat:
-                @"<data 16B %02x%02x%02x%02x%02x%02x%02x%02x"
-                 "%02x%02x%02x%02x%02x%02x%02x%02x>",
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
-                bytes[12], bytes[13], bytes[14], bytes[15]];
-        }
-        return [NSString stringWithFormat:@"<data %luB>",
-                (unsigned long)length];
-    }
-    if ([value isKindOfClass:[NSNumber class]]) return [value stringValue];
-    if ([value isKindOfClass:[NSArray class]])
-        return [NSString stringWithFormat:@"<array %lu>",
-                (unsigned long)[(NSArray *)value count]];
-    return @"<object>";
-}
-
 static NSString *bt_transport_survey(void) {
-    static const char *classes[] = {
-        "AppleConvergedIPCInterface", "AppleConvergedIPCRTIInterface",
-        "AppleConvergedIPCControl", "AppleBluetoothModule",
-        "AppleSimpleUARTSync", "IOSkywalkNexus",
-        "IOBluetoothHCIController", "AppleBluetoothHCI",
-    };
+    /* App 里没有 IOKit 头（iOS SDK 不带 IOKitLib.h），但系统里的 ioreg
+     * 能把整棵 registry 连属性一起吐出来，比自己去匹配 IOService 还全。
+     * 这里只挑和 HCI 传输层有关的行，凑成一段可读的现场快照。 */
+    NSString *tree = wlan_ioreg_snapshot(YES);
+    if (!tree.length) return @"(ioreg unavailable)\n";
+
+    BOOL hasACIPC =
+        [tree rangeOfString:@"<class AppleConvergedIPCInterface"].location !=
+        NSNotFound;
+    BOOL hasNexusUUID = [tree rangeOfString:@"IOSkywalkNexusUUID"].location !=
+                        NSNotFound;
+    BOOL hasUARTNode =
+        [tree rangeOfString:@"com.apple.uart.bluetooth"].location != NSNotFound;
+    BOOL hasUARTSync =
+        [tree rangeOfString:@"<class AppleSimpleUARTSync"].location != NSNotFound;
+
     NSMutableString *out = [NSMutableString string];
-    for (size_t c = 0; c < sizeof(classes) / sizeof(classes[0]); c++) {
-        if (out.length > 5000) {
-            [out appendString:@"(truncated)\n"];
-            break;
-        }
-        CFMutableDictionaryRef matching = IOServiceMatching(classes[c]);
-        if (!matching) continue;
-        io_iterator_t iterator = 0;
-        if (IOServiceGetMatchingServices(MACH_PORT_NULL, matching, &iterator) !=
-                KERN_SUCCESS ||
-            !iterator)
-            continue;
-        io_object_t service = 0;
-        int index = 0;
-        while ((service = IOIteratorNext(iterator)) != 0 && index < 6) {
-            index++;
-            [out appendFormat:@"%@#%d", @(classes[c]), index];
-            CFMutableDictionaryRef properties = NULL;
-            if (IORegistryEntryCreateCFProperties(
-                    service, &properties, kCFAllocatorDefault, 0) ==
-                    KERN_SUCCESS &&
-                properties) {
-                NSDictionary *dictionary = CFBridgingRelease(properties);
-                NSArray *keys = [[dictionary allKeys]
-                    sortedArrayUsingComparator:^NSComparisonResult(id a,
-                                                                   id b) {
-                        return [[a description] compare:[b description]];
-                    }];
-                for (id key in keys) {
-                    [out appendFormat:@" %@=%@", [key description],
-                                     survey_property_text(dictionary[key])];
-                }
-            } else {
-                [out appendString:@" (no properties)"];
+    [out appendFormat:@"acipc_interface=%s skywalk_nexus_uuid=%s "
+                      @"uart_node=%s uart_sync_class=%s\n",
+                      hasACIPC ? "present" : "absent",
+                      hasNexusUUID ? "present" : "absent",
+                      hasUARTNode ? "present" : "absent",
+                      hasUARTSync ? "present" : "absent"];
+
+    NSArray<NSString *> *markers = @[
+        @"AppleConvergedIPC", @"ACIPCInterface", @"Skywalk", @"skywalk",
+        @"NexusUUID", @"com.apple.uart.bluetooth", @"IOTTYBaseName",
+        @"BlueTool", @"bluetooth-", @"AppleBluetooth",
+    ];
+    NSUInteger kept = 0;
+    for (NSString *line in [tree componentsSeparatedByString:@"\n"]) {
+        if (kept >= 120 || out.length > 6000) break;
+        if (line.length > 400)
+            line = [[line substringToIndex:400] stringByAppendingString:@"..."];
+        for (NSString *marker in markers) {
+            if ([line rangeOfString:marker].location != NSNotFound) {
+                [out appendFormat:@"%@\n", line];
+                kept++;
+                break;
             }
-            [out appendString:@"\n"];
-            IOObjectRelease(service);
         }
-        IOObjectRelease(iterator);
     }
-    if (!out.length) [out appendString:@"(no matching IOService)\n"];
+    if (!kept) [out appendString:@"(no transport-related registry line)\n"];
     return out;
 }
 
