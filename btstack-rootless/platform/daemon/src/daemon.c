@@ -112,6 +112,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <notify.h>
 #include "../port/ios/src/btstack_control_iphone.h"
+#include "../port/ios/src/hci_transport_acipc_iphone.h"
 #include "../port/ios/src/hci_transport_skywalk_iphone.h"
 #include "../port/ios/src/platform_iphone.h"
 // support for "enforece wake device" in h4 - used by iOS power management
@@ -2043,6 +2044,7 @@ int btstack_server_run(int tcp_flag){
     btstack_control_t * control = NULL;
     const btstack_uart_block_t * uart_block_implementation = NULL;
     int iphone_skywalk_transport = 0;
+    int iphone_acipc_transport = 0;
     (void) uart_block_implementation;
     
 #ifdef HAVE_TRANSPORT_H4
@@ -2067,14 +2069,26 @@ int btstack_server_run(int tcp_flag){
 
     config = &hci_transport_config_uart;
 #ifdef HAVE_PLATFORM_IPHONE_OS
+    /* 优先级：ACIPC(PCIe) > Skywalk > 传统 UART。
+     * iPhone 11 及以后的机型没有 UART netgraph 节点，蓝牙挂在 bluetooth-pcie
+     * 下面，只能走 AppleConvergedTransport；iOS 15/16 才是 Skywalk nexus。 */
+    iphone_acipc_transport = hci_transport_acipc_iphone_present();
     iphone_skywalk_transport = hci_transport_skywalk_iphone_present();
+    if (iphone_acipc_transport && !hci_transport_acipc_iphone_available()) {
+        printf("BTstack transport error: Apple ConvergedIPC/PCIe is present, "
+               "but the required userspace API is unavailable\n");
+        return -1;
+    }
     if (iphone_skywalk_transport &&
         !hci_transport_skywalk_iphone_available()) {
         printf("BTstack transport error: Apple ConvergedIPC/Skywalk is "
                "present, but the required userspace API is unavailable\n");
         return -1;
     }
-    if (iphone_skywalk_transport) {
+    if (iphone_acipc_transport) {
+        transport = hci_transport_acipc_iphone_instance();
+        printf("BTstack transport: Apple ConvergedIPC/PCIe\n");
+    } else if (iphone_skywalk_transport) {
         transport = hci_transport_skywalk_iphone_instance();
         printf("BTstack transport: Apple ConvergedIPC/Skywalk\n");
     } else {
@@ -2092,7 +2106,7 @@ int btstack_server_run(int tcp_flag){
 
 #ifdef HAVE_PLATFORM_IPHONE_OS
     control = &btstack_control_iphone;
-    if (!iphone_skywalk_transport &&
+    if (!iphone_acipc_transport && !iphone_skywalk_transport &&
         btstack_control_iphone_power_management_supported()){
         hci_transport_h4_iphone_set_enforce_wake_device("/dev/btwake");
     }

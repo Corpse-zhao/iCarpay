@@ -1512,9 +1512,9 @@ static NSString *dump_cache_image(NSString *cacheDir, NSString *wantedSuffix,
                     if (sc + 80 > hp + hdrLen) break;
                     *(uint64_t *)(sc + 32) = 0;   /* section addr   */
                     *(uint64_t *)(sc + 40) = 0;   /* section size   */
-                    *(uint32_t *)(sc + 44) = 0;   /* section offset */
-                    *(uint32_t *)(sc + 52) = 0;   /* reloff         */
-                    *(uint32_t *)(sc + 56) = 0;   /* nreloc         */
+                    *(uint32_t *)(sc + 48) = 0;   /* section offset */
+                    *(uint32_t *)(sc + 56) = 0;   /* reloff         */
+                    *(uint32_t *)(sc + 60) = 0;   /* nreloc         */
                 }
             } else if (segCount < ICARPAY_MAX_SEG) {
                 segs[segCount].cmdOff = off;
@@ -1569,7 +1569,7 @@ static NSString *dump_cache_image(NSString *cacheDir, NSString *wantedSuffix,
             uint64_t rel = (sa >= segs[i].srcVmaddr)
                                ? sa - segs[i].srcVmaddr : 0;
             *(uint64_t *)(sc + 32) = kBase + cursor + rel;      /* addr   */
-            *(uint32_t *)(sc + 44) = (uint32_t)(cursor + rel);  /* offset */
+            *(uint32_t *)(sc + 48) = (uint32_t)(cursor + rel);  /* offset */
         }
         [map appendFormat:
             @"%s src=0x%llx size=0x%llx -> off=0x%llx\n",
@@ -1841,6 +1841,41 @@ static NSString *file_fingerprint(const char *path) {
             (long long)st.st_size, [fmt stringFromDate:mtime]];
 }
 
+/* 传输层实际选了哪条：从 daemon 日志里挑出相关行，装一次就够了 */
+static NSString *transport_choice_hint(void) {
+    NSMutableArray<NSString *> *picked = [NSMutableArray array];
+    static const char *const tags[] = {
+        "BTstack transport", "acipc:", "skywalk:", "h4_open:",
+        "BTstack transport error", NULL,
+    };
+    NSString *logs[2] = {
+        [NSString stringWithUTF8String:log_path("BTdaemon-direct.log")],
+        [NSString stringWithUTF8String:log_path("carplay_bt.log")],
+    };
+    for (int f = 0; f < 2; f++) {
+        NSString *text = bounded_log_tail(logs[f], 65536, 400);
+        if (!text.length) continue;
+        for (NSString *raw in [text componentsSeparatedByString:@"\n"]) {
+            NSString *line = raw;
+            for (int t = 0; tags[t]; t++) {
+                if ([line containsString:@(tags[t])]) {
+                    [picked addObject:
+                        [NSString stringWithFormat:@"%@| %@",
+                            f == 0 ? @"daemon" : @"carplay_bt",
+                            [line length] > 200
+                                ? [line substringToIndex:200] : line]];
+                    break;
+                }
+            }
+        }
+    }
+    if (!picked.count) return @"(none)";
+    NSUInteger first = picked.count > 12 ? picked.count - 12 : 0;
+    return [[picked subarrayWithRange:
+                NSMakeRange(first, picked.count - first)]
+        componentsJoinedByString:@"\n  "];
+}
+
 static NSString *bluetooth_diagnostic_report(
     NSString *reason, BOOL retryAttempted,
     BluetoothRegistryProbeState registry) {
@@ -1955,6 +1990,7 @@ static NSString *bluetooth_diagnostic_report(
     /* 传输层到底暴露成什么，直接看这一块：iOS 14 上 skywalk 名字可能不同，
      * 而 netgraph 的 com.apple.uart.bluetooth 未必存在。 */
     [report appendFormat:@"\nbt_survey:\n%@", survey];
+    [report appendFormat:@"\ntransport_hint:\n  %@\n", transport_choice_hint()];
     if (daemonTransport.length)
         [report appendFormat:@"\ndaemon transport trace:\n%@\n",
                                daemonTransport];

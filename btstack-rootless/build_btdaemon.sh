@@ -21,6 +21,7 @@ SRC_C=(
   $ROOT/platform/posix/btstack_run_loop_posix.c $ROOT/platform/posix/btstack_tlv_posix.c
   $ROOT/port/ios/src/hci_transport_h4_iphone.c
   $ROOT/port/ios/src/hci_transport_skywalk_iphone.c
+  $ROOT/port/ios/src/hci_transport_acipc_iphone.c
   $ROOT/port/ios/SpringBoardAccess/SpringBoardAccess.c
 )
 SRC_M=(
