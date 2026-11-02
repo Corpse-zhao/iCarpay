@@ -162,6 +162,8 @@ typedef struct {
     int interface_number;
     int rx_shape_logged;
     int tx_shape_logged;
+    int tx_framed;          /* 写的时候是否带 H4 类型字节 */
+    int rx_framed;          /* 读回来是否带 H4 类型字节 */
 
     btstack_data_source_t wake_data_source;
     int wake_data_source_registered;
@@ -362,6 +364,11 @@ static void acipc_deliver_queued(btstack_data_source_t *data_source,
 
 /* 把一次 Read() 拿到的字节按 H4 拆成 HCI 包 */
 static void acipc_dispatch_h4(const uint8_t *buffer, uint32_t length) {
+    if (!acipc.rx_framed) {
+        acipc_enqueue(HCI_EVENT_PACKET, buffer,
+                      (uint16_t)(length > 0xFFFF ? 0xFFFF : length));
+        return;
+    }
     uint32_t offset = 0;
     while (offset < length) {
         uint8_t type = buffer[offset];
@@ -386,15 +393,16 @@ static void acipc_dispatch_h4(const uint8_t *buffer, uint32_t length) {
                 packet_type = HCI_EVENT_PACKET;
                 break;
             default:
+                /* 传输层不带 H4 前缀：整块当成一个事件包交给 BTstack。
+                 * 首次出现时记一笔，后续就按裸包模式走。 */
                 if (!acipc.rx_shape_logged) {
                     acipc.rx_shape_logged = 1;
-                    log_error("acipc: RX frame does not start with an H4 "
-                              "type byte (0x%02x); first bytes %02x %02x %02x "
-                              "%02x", type, buffer[0],
-                              length > 1 ? buffer[1] : 0,
-                              length > 2 ? buffer[2] : 0,
-                              length > 3 ? buffer[3] : 0);
+                    acipc.rx_framed = 0;
+                    log_error("acipc: RX has no H4 type byte (first=0x%02x), "
+                              "switching to unframed mode", type);
                 }
+                acipc_enqueue(HCI_EVENT_PACKET, buffer,
+                              (uint16_t)(length > 0xFFFF ? 0xFFFF : length));
                 return;
         }
         if (offset + header > length) return;
@@ -433,6 +441,12 @@ static void *acipc_reader_main(void *arg) {
         if (acipc.stopping) break;
         if ((ok & 1) && got > 0 && got <= (uint32_t)sizeof(acipc.rx_buffer)) {
             empty_polls = 0;
+            if (acipc.rx_shape_logged == 0) {
+                char hex[3 * 17 + 4] = {0};
+                for (uint32_t i = 0; i < got && i < 16; i++)
+                    snprintf(hex + i * 3, 4, "%02x ", acipc.rx_buffer[i]);
+                log_info("acipc: RX#1 %u bytes: %s", got, hex);
+            }
             acipc_dispatch_h4(acipc.rx_buffer, got);
         } else {
             if (got > 0) {
@@ -466,6 +480,8 @@ static int transport_open(void) {
     acipc.stopping = 0;
     acipc.rx_shape_logged = 0;
     acipc.tx_shape_logged = 0;
+    acipc.tx_framed = 1;
+    acipc.rx_framed = 1;
     acipc.queue_head = NULL;
     acipc.queue_tail = NULL;
     acipc.queue_count = 0;
@@ -595,18 +611,36 @@ static int transport_send_packet(uint8_t packet_type, uint8_t *packet,
     acipc.tx_buffer[0] = h4_type;
     memcpy(acipc.tx_buffer + 1, packet, (size_t)size);
     uint32_t written = 0;
-    int rc = acipc.api.write(acipc.handle, acipc.tx_buffer,
-                             (uint32_t)(size + 1), &written,
+    if (acipc.tx_framed) {
+        int rc = acipc.api.write(acipc.handle, acipc.tx_buffer,
+                                 (uint32_t)(size + 1), &written,
+                                 ACIPC_TX_TIMEOUT_MS, NULL);
+        if ((rc & 1) && written == (uint32_t)(size + 1)) {
+            if (!acipc.tx_shape_logged) {
+                acipc.tx_shape_logged = 1;
+                log_info("acipc: first TX ok type=0x%02x len=%d (H4 framed)",
+                         h4_type, size + 1);
+            }
+            return 0;
+        }
+        /* 带类型字节被拒：可能这条通道只吃裸包，退回不带前缀再试一次 */
+        log_info("acipc: framed write rejected rc=0x%x wrote=%u, retrying "
+                 "unframed", rc, written);
+        acipc.tx_framed = 0;
+    }
+
+    written = 0;
+    int rc = acipc.api.write(acipc.handle, packet, (uint32_t)size, &written,
                              ACIPC_TX_TIMEOUT_MS, NULL);
-    if (!(rc & 1) || written != (uint32_t)(size + 1)) {
+    if (!(rc & 1) || written != (uint32_t)size) {
         log_error("acipc: write failed rc=0x%x wrote=%u want=%d", rc, written,
-                  size + 1);
+                  size);
         return -1;
     }
     if (!acipc.tx_shape_logged) {
         acipc.tx_shape_logged = 1;
-        log_info("acipc: first TX ok type=0x%02x len=%d (H4 framed)",
-                 h4_type, size + 1);
+        log_info("acipc: first TX ok type=0x%02x len=%d (unframed)",
+                 h4_type, size);
     }
     return 0;
 }
