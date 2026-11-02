@@ -1093,8 +1093,9 @@ static NSString *bt_transport_survey(void) {
         @"BlueTool", @"bluetooth-", @"AppleBluetooth",
     ];
     NSUInteger kept = 0;
-    for (NSString *line in [tree componentsSeparatedByString:@"\n"]) {
+    for (NSString *rawLine in [tree componentsSeparatedByString:@"\n"]) {
         if (kept >= 120 || out.length > 6000) break;
+        NSString *line = rawLine;
         if (line.length > 400)
             line = [[line substringToIndex:400] stringByAppendingString:@"..."];
         for (NSString *marker in markers) {
