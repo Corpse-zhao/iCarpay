@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    # 主线是 roothide（iOS 15/16）。rootful 是给 unc0ver/iOS 14 的备用线，
+    # 编译失败不该挡住主线发布 —— 所以只让它失败、不标红整轮。
+    continue-on-error: ${{ matrix.variant != 'roothide' }}
     strategy:
       fail-fast: false
       matrix:
@@ -17,11 +20,21 @@ jobs:
             arch: iphoneos-arm64e
             cflags: "-DSHOWCASE_ROOTLESS=1"
             debian: packaging/roothide
+            suffix: ""
           # rootful（unc0ver / checkra1n 系，真 /Applications、/usr/bin）
           - variant: rootful
             arch: iphoneos-arm
             cflags: "-DICARPAY_SLOW_BT_READY=1"
             debian: packaging/rootful
+            suffix: ""
+          # taurine（iOS 14 Taurine）：路径同 rootful，但蓝牙接管顺序相反 ——
+          # 必须先用 launchd 拉起 BTdaemon，再停 bluetoothd，否则 launchd
+          # 卡在「卸载进行中」不再 spawn，BTdaemon 永远起不来。
+          - variant: taurine
+            arch: iphoneos-arm
+            cflags: "-DSHOWCASE_TAURINE=1"
+            debian: packaging/rootful
+            suffix: "-taurine"
     env:
       PKG_ARCH: ${{ matrix.arch }}
       PKG_ID: com.corpsezhao.icarpay
@@ -242,7 +255,7 @@ jobs:
       - name: Package .deb
         run: |
           set -euo pipefail
-          DEB="build/${PKG_ID}_${PKG_VERSION}_${PKG_ARCH}.deb"
+          DEB="build/${PKG_ID}_${PKG_VERSION}_${PKG_ARCH}${{ matrix.suffix }}.deb"
           python3 tools/make_deb.py \
             --payload build/payload \
             --debian  ${{ matrix.debian }} \

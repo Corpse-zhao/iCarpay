@@ -1176,6 +1176,10 @@ static NSString *bluetooth_diagnostic_report(
         [NSString stringWithUTF8String:log_path("app.log")], 32768, 120);
     NSString *guardLog = bounded_log_tail(
         [NSString stringWithUTF8String:log_path("bluetooth-recovery.log")], 8192, 24);
+    /* BAA 证书取不到时会停在「请连接互联网」，真正的原因只在 broker 日志里：
+     * 是 DeviceIdentity 接口拿不到证书、还是 framework 缺失、还是等待超时。 */
+    NSString *baaLog = bounded_log_tail(
+        [NSString stringWithUTF8String:log_path("baa_broker.log")], 8192, 24);
     NSString *combined = [NSString stringWithFormat:@"%@\n%@\n%@\n%@",
                           initial ?: @"", retry ?: @"", daemon ?: @"",
                           daemonDirect ?: @""];
@@ -1265,6 +1269,8 @@ static NSString *bluetooth_diagnostic_report(
         [report appendFormat:@"\napp.log trace ([BT]/[HANDOFF]/[HOTSPOT]):\n%@\n", appTrace];
     if (guardLog.length)
         [report appendFormat:@"\nbluetooth-recovery.log tail:\n%@\n", guardLog];
+    if (baaLog.length)
+        [report appendFormat:@"\nbaa_broker.log tail:\n%@\n", baaLog];
     return report;
 }
 
@@ -3695,6 +3701,12 @@ typedef NS_ENUM(NSInteger, ConnectStep) {
 
 /* Cars */
 @property (nonatomic, strong) CarStore *cars;
+
+/* Taurine 专用的蓝牙接管顺序（实现体在后面，先声明避免隐式 id 推断）。
+ * Taurine 上必须先让 launchd 拉起 BTdaemon，再停 bluetoothd —— 反过来的话
+ * launchd 会卡在「卸载进行中」，之后不再 spawn 任何作业。 */
+- (BOOL)startBTstackDaemon:(const char *)launchctl;
+- (void)stopSystemBluetooth:(const char *)launchctl;
 @end
 
 /* Forward: defined later */
